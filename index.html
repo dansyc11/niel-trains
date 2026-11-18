@@ -52,6 +52,13 @@
   .seg.user b { color: var(--rk, var(--fg)); }
   .seg.due { color: var(--accent); font-weight: 700; }
   .up { color: var(--ok); }
+  .down { color: var(--err); }
+  .tbars { margin-top: .6rem; }
+  .tbar { display: grid; grid-template-columns: 24ch 6ch 1fr 5ch; column-gap: 1ch; align-items: center; }
+  .tbar .bt { height: .7em; }
+  .tbar .bf { display: block; height: 100%; min-width: 3px; background: var(--c); border-radius: 1px; }
+  .tbar > span:last-child { text-align: right; }
+  @media (max-width: 640px) { .tbar { grid-template-columns: minmax(0, 1fr) 6ch 7ch 4ch; } .tbar > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
   .gain { margin-top: .4rem; }
   .seg.grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   #st-duel { flex: 0 1 auto; min-width: 7ch; overflow: hidden; text-overflow: ellipsis; }

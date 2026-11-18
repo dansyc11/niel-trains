@@ -522,8 +522,12 @@
     return out;
   }
 
-  const report = () => L.topicReport({ problems: data.problems, subs: data.subs, results: resultsMap(),
-                                       level: currentLevel(), now: nowSec(), windowDays: state.windowDays });
+  // A problem that is open on your desk has no result yet.
+  const pendingKeys = () => new Set(state.quests.filter(isOpen).map(q => q.p.key));
+  const reportInput = extra => Object.assign({ problems: data.problems, subs: data.subs, results: resultsMap(), level: currentLevel(),
+    anchor: data.rating || currentLevel(), now: nowSec(), windowDays: state.windowDays, pending: pendingKeys(),
+    unfinished: data.unfinished, compareDays: 30 }, extra);
+  const report = () => L.topicReport(reportInput());
 
   function upsolveItems() {
     const skip = new Set();
@@ -564,8 +568,9 @@
     const b = defaultBand();
     if (state.ratingMode === 'exact') return bandText(b);
     const d = state.delta, e = state.deltaHi;
-    return bandText(b) + ' (level ' + L.roundLevel(currentLevel()) +
-      (e != null && e !== d ? ', ' + stepText(Math.min(d, e)) + ' to ' + stepText(Math.max(d, e)) : d ? ' ' + stepText(d) : '') + ')';
+    const from = state.levelOverride ? L.roundLevel(currentLevel()) + ' set by hand' : 'your rating';
+    return bandText(b) + ' (' + from +
+      (e != null && e !== d ? ' ' + stepText(Math.min(d, e)) + ' to ' + stepText(Math.max(d, e)) : d ? ' ' + stepText(d) : '') + ')';
   }
 
   function filterText() {
@@ -714,7 +719,7 @@
   function topicRows(list) {
     return list.map(t => '<div class="trow"><span>' + esc(t.tag) + '</span><span class="tstats">' +
       '<span><b>' + t.solved + '</b> solved</span>' +
-      '<span>' + (t.rating != null ? 'rating <b>' + t.rating + '</b>' : '<b>' + t.n + '</b> of 3 clean') + '</span>' +
+      '<span>' + (t.rating != null ? 'rating <b>' + t.rating + '</b>' + (t.wins < 3 ? '?' : '') : 'no result') + '</span>' +
       '<span><b>' + t.recent + '</b> in 30d</span>' +
       '<span>' + (t.failed ? '<b>' + t.failed + '</b> failed' : '') + '</span>' +
       '<span>' + (t.notClean ? '<b>' + t.notClean + '</b> with hint' : '') + '</span>' +
@@ -725,29 +730,40 @@
     return '<pre class="logo" aria-hidden="true" style="--rk:' + color + '">' + esc(LOGO) + '</pre>';
   }
 
+  const deltaText = (d, tail) => d ? ' <b class="' + (d > 0 ? 'up' : 'down') + '">' + (d > 0 ? '+' : '−') + Math.abs(d) + '</b>' + tail : '';
+
+  // The rating of each common topic, highest first. Green: strong. Red: a gap.
+  function topicBars(rep) {
+    const list = rep.topics.filter(t => t.common && t.rating != null).sort((a, b) => (b.rating - a.rating) || (a.tag < b.tag ? -1 : 1));
+    if (!list.length) return '';
+    const lo = 600, hi = Math.max(1600, list[0].rating + 100);
+    return '<div class="tbars">' + list.map(t => {
+      const color = t.wins < 3 ? 'var(--line)' : t.group === 'strong' ? 'var(--ok)' : t.group === 'gap' ? 'var(--err)' : 'var(--dim)';
+      return '<div class="tbar"><span>' + esc(t.tag) + '</span><b>' + t.rating + (t.wins < 3 ? '?' : '') + '</b><span class="bt"><span class="bf" style="width:' +
+        Math.max(2, Math.min(100, 100 * (t.rating - lo) / (hi - lo))).toFixed(1) + '%;--c:' + color + '"></span></span><span>' +
+        deltaText(t.delta, '') + '</span></div>';
+    }).join('') + '</div>' +
+      ln('Your rating in each common topic. Green: strong. Red: a gap. ?: fewer than 3 solves. The last column is the change in 30 days. ' +
+         runBtn('topics'), 'dim small');
+  }
+
   // The banner: your Codeforces numbers, in the style of fastfetch.
   function banner() {
     const now = nowSec(), rank = L.rankOf(data.rating);
-    const sum = L.summary(report(), new Set(state.exclude)), prog = L.progress(data.subs, data.problems, now);
+    const rep = report(), sum = L.summary(rep, new Set(state.exclude)), prog = L.progress(data.subs, data.problems, now);
     const open = openQuests(), acc = open.filter(q => q.status === 'accepted').length;
     const marks = openMarks(), due = marks.filter(m => m.dueAt <= now).length, ups = upsolveItems().length;
     const pr = sum.practice;
-    const top = (list, rated) => list.length ? list.slice(0, 3).map(t => esc(t.tag) + (rated ? ' ' + t.rating : '')).join(', ') : 'none yet';
     const lad = ladder(), next = lad.find(r => r.next);
     const title = state.handle + '@codeforces';
     const rows = [
       ['Rating', data.rating ? '<span class="rk">' + data.rating + ' ' + esc(rank.name) + '</span>' +
                  (data.maxRating ? ' (max ' + data.maxRating + ')' : '') : 'no rating yet'],
-      ['Level', L.roundLevel(currentLevel()) + (state.levelOverride ? ' (you set it by hand)' : '')],
-      ['Practice', pr.rating != null ? '<b>' + pr.rating + '</b> from your ' + pr.need + ' best clean solves'
-                                     : pr.n + ' of ' + pr.need + ' clean solves for a practice rating'],
+      ['Practice', pr.rating != null ? '<b>' + pr.rating + '</b>' + deltaText(pr.delta, ' in 30 days') : 'no results yet'],
       ['Solved', plural(prog.total, 'problem') + ', ' + prog.recent30 + ' in the last 30 days'],
       ['Last AC', prog.lastOk ? esc(rel(prog.lastOk)) : 'none yet'],
       ['Contests', prog.contests + ' live, ' + prog.virtuals + ' virtual'],
-      ['Strong', top(sum.strong, true)],
-      ['On level', top(sum.level, true)],
-      ['Gaps', top(sum.gaps)],
-      ['Start next', top(sum.next)],
+      ['Start next', sum.next.length ? sum.next.slice(0, 3).map(t => esc(t.tag)).join(', ') : 'none yet'],
       ['Desk', open.length ? open.length + ' open' + (acc ? ', ' + acc + ' with Accepted' : '') : 'empty'],
       ['Upsolve', ups ? plural(ups, 'problem') : 'nothing'],
       ['Re-solve', marks.length ? due + ' due, ' + (marks.length - due) + ' later' : 'nothing'],
@@ -758,7 +774,7 @@
     ];
     if (state.uva) {
       const ac = data.uvaSubs ? data.uvaSubs.filter(x => x.ok) : [];
-      rows.splice(6, 0, ['UVa', !data.uvaSubs ? 'no answer from uHunt'
+      rows.splice(5, 0, ['UVa', !data.uvaSubs ? 'no answer from uHunt'
         : plural(L.solvedKeys(data.uvaSubs).size, 'solved problem') + (ac.length ? ', last AC ' + esc(rel(Math.max.apply(null, ac.map(x => x.time)))) : '')]);
     }
     if (window.CP4) {
@@ -772,7 +788,7 @@
     return '<div class="fetch" style="--rk:var(--rk' + rank.color + ')">' + logoHtml('var(--rk' + rank.color + ')') +
       '<div class="rise"><p class="ftitle"><span class="rk">' + esc(state.handle) + '</span>@codeforces</p>' +
       '<p class="frule" aria-hidden="true" style="--i:1">' + '-'.repeat(title.length) + '</p>' + kv(rows) +
-      '<p class="odds" style="--i:' + (rows.length + 2) + '">' + odds + '</p></div></div>';
+      '<p class="odds" style="--i:' + (rows.length + 2) + '">' + odds + '</p>' + topicBars(rep) + '</div></div>';
   }
 
   function bannerTail() {
@@ -955,7 +971,7 @@
       }
       q = pool[0]; key = q.p.key;
     }
-    if (q && q.status === 'accepted') { chooseResult(q, name); return io.print(questCard(q, true) + (name === 'clean' ? gainHtml(q.p) : '')); }
+    if (q && q.status === 'accepted') { chooseResult(q, name); return io.print(questCard(q, true) + gainHtml(q.p)); }
     if (q && name === 'spoiled') {
       putAway(q, 'spoiled');
       return io.print(ln('<b>' + esc(show(key)) + '</b> is spoiled. Write the code yourself now. It comes back in 7 days for a new try from scratch.'));
@@ -965,7 +981,7 @@
     if (done) {
       chooseResult(done, name);
       return io.print(ln('The result of <b>' + esc(show(key)) + '</b> is now ' + esc(L.RESULT_LABEL[name]) + '.') + questCard(done) +
-                      (name === 'clean' ? gainHtml(done.p) : ''));
+                      gainHtml(done.p));
     }
     if (name !== 'spoiled') return io.err(show(key) + ' is not on your desk.');
     if (/^uva\d+$/.test(key)) return io.err(show(key) + ' is not on your desk. Start it first: start uva ' + key.slice(3));
@@ -1057,22 +1073,21 @@
     io.set(banner() + bannerTail());
   }
 
-  // After a clean solve: the change of your practice rating and of the topic ratings of that problem.
+  // After a result: the change of your practice rating and of the topic ratings of that problem.
   function gainHtml(p) {
     const full = (p && data.byKey.get(p.key)) || p;
     if (!full || full.rating == null || !data.subs) return '';
-    const base = { problems: data.problems, subs: data.subs, level: currentLevel(), now: nowSec(), windowDays: state.windowDays };
-    const res = resultsMap(), without = Object.assign({}, res);
-    without[full.key] = 'hint1';
-    const a = L.topicReport(Object.assign({ results: without }, base)), b = L.topicReport(Object.assign({ results: res }, base));
+    const before = pendingKeys();
+    before.add(full.key);
+    const a = L.topicReport(reportInput({ pending: before, compareDays: 0 })), b = L.topicReport(reportInput({ compareDays: 0 }));
     const old = {};
     for (const t of a.topics) old[t.tag] = t;
-    const line = (x, y, need) => y.rating == null ? y.n + ' of ' + need + ' clean solves for a rating'
-      : x.rating == null ? 'first rating <b>' + y.rating + '</b>'
-      : y.rating > x.rating ? x.rating + ' → <b>' + y.rating + '</b> <b class="up">+' + (y.rating - x.rating) + '</b>'
-      : '<b>' + y.rating + '</b>, no change. A clean solve above ' + y.floor + ' raises it.';
-    const rows = [['practice', line(a.practice, b.practice, b.practice.need)]];
-    for (const t of b.topics) if ((full.tags || []).indexOf(t.tag) >= 0) rows.push([t.tag, line(old[t.tag] || { rating: null }, t, 3)]);
+    const line = (x, y) => y.rating == null ? 'no result'
+      : x.rating == null ? 'first result: <b>' + y.rating + '</b>'
+      : y.rating !== x.rating ? x.rating + ' → <b>' + y.rating + '</b>' + deltaText(y.rating - x.rating, '')
+      : '<b>' + y.rating + '</b>, no change';
+    const rows = [['practice', line(a.practice, b.practice)]];
+    for (const t of b.topics) if ((full.tags || []).indexOf(t.tag) >= 0) rows.push([t.tag, line(old[t.tag] || { rating: null }, t)]);
     return '<div class="gain">' + kv(rows) + '</div>';
   }
 
@@ -1083,9 +1098,9 @@
     const names = (list, rated) => list.length ? list.map(t => esc(t.tag) + (rated ? ' <b>' + t.rating + '</b>' : '')).join(', ')
                                                : '<span class="dim">none</span>';
     const common = rep.topics.filter(t => t.common), rare = rep.topics.filter(t => !t.common);
-    let h = ln('Your level is <b>' + rep.level + '</b>. ' + esc(levelFrom())) +
-      ln('Your practice rating is ' + (pr.rating != null ? '<b>' + pr.rating + '</b>. A clean solve above <b>' + pr.floor + '</b> raises it.'
-                                                         : 'not ready: ' + pr.n + ' of ' + pr.need + ' clean solves.')) +
+    let h = ln('Your rating is <b>' + (data.rating || 'not set yet') + '</b>. Your practice rating is ' +
+        (pr.rating != null ? '<b>' + pr.rating + '</b>' + deltaText(pr.delta, ' in 30 days') + ', from ' + plural(pr.n, 'result') + '.'
+                           : 'not ready. It needs one result.')) +
       kv([['strong', names(sum.strong, true)], ['on level', names(sum.level, true)], ['gaps', names(sum.gaps)], ['start next', names(sum.next)]]) +
       acts(runBtn('train'), sum.next.length ? fillBtn('train with ' + sum.next.slice(0, 3).map(t => t.tag).join(', ')) : '',
            runBtn('period'), runBtn('filters')) +
@@ -1096,14 +1111,15 @@
       h += head('Rare topics near your level') +
            ln('Fewer than 3 in 100 problems near your level have these topics. train does not pick them.', 'dim small') + topicRows(rare);
     } else if (rare.length) h += acts(runBtn('topics all', 'topics all (' + rare.length + ' rare topics)'));
-    h += ln('practice rating: the mean of your ' + pr.need + ' highest-rated clean solves from ' + periodName() +
-            '. A topic rating uses your 3 highest in that topic. A clean solve above the lowest of them raises the rating.', 'dim small') +
-         ln('strong: a topic rating 200 or more above your level. on level: from 100 below to 199 above. ' +
-            'gaps: common from ' + rep.level + ' to ' + rep.hi + ', with a lower rating or no rating. ' +
-            'start next: rare there, and common from ' + rep.nextLo + ' to ' + rep.nextHi + '.', 'dim small') +
-         ln('failed: tried and not solved. Solves that you marked hint or spoiled do not count. ' +
-            '+ includes a topic for suggest and train. − excludes it.', 'dim small') +
-         ln('These numbers are estimates from your solves. They are not your contest rating.', 'dim small');
+    h += ln('practice rating: the rating that fits your results from ' + periodName() + ' best, on the Codeforces scale. ' +
+            'A problem of a contest that you took counts in full: solved in the contest, or not. ' +
+            'A solve outside a contest has no clock. It counts as a problem 200 easier, with half the weight, and your hardest solves count most. ' +
+            'There, clean is a win, a hint is a part of a win, and spoiled or not solved is a loss. ' +
+            'A result loses half of its weight each 180 days.', 'dim small') +
+         ln('strong: 3 or more solves, and 75 or more above your practice rating. on level: within 75. ' +
+            'gaps: common from ' + rep.level + ' to ' + rep.hi + ', and lower or with fewer than 3 solves. ' +
+            'start next: rare there, and common from ' + rep.nextLo + ' to ' + rep.nextHi + '. ?: fewer than 3 solves.', 'dim small') +
+         ln('failed: tried and not solved. + includes a topic for suggest and train. − excludes it. These numbers are estimates.', 'dim small');
     io.print(h);
   }
 
@@ -1732,8 +1748,8 @@
   function scoutHtml(info, changes, subs) {
     const now = nowSec(), level = currentLevel(), rating = info.rating || 0;
     const c = L.career(changes), pr = L.progress(subs, data.problems, now), chance = L.winChance(myRating(), rating);
-    const mine = L.topicReport({ problems: data.problems, subs: data.subs, results: resultsMap(), level: level, now: now, windowDays: 0 });
-    const theirs = L.topicReport({ problems: data.problems, subs: subs, results: {}, level: level, now: now, windowDays: 0 });
+    const mine = L.topicReport(reportInput({ windowDays: 0, compareDays: 0 }));
+    const theirs = L.topicReport({ problems: data.problems, subs: subs, results: {}, level: level, anchor: rating || level, now: now, windowDays: 0 });
     const edges = L.topicEdges(mine, theirs, 5), top = pr.buckets[pr.buckets.length - 1];
     const row = ladder().find(r => L.same(r.handle, info.handle));
     const sign = n => (n > 0 ? '+' : n < 0 ? '−' : '') + Math.abs(n);
@@ -1749,14 +1765,14 @@
     if (c.bestRank) rows.push(['Best rank', c.bestRank.rank + ' in ' + esc(c.bestRank.name)]);
     rows.push(['Solved', plural(pr.total, 'problem') + ', ' + pr.recent30 + ' in the last 30 days' + (top ? '. Hardest: ' + top.lo + '-' + top.hi : '')]);
     rows.push(['Topics', pr.topics.slice(0, 6).map(t => esc(t.tag) + ' ' + t.n).join(', ') || 'none']);
-    rows.push(['Ahead of you', edges.length ? edges.map(e => esc(e.tag) + ' ' + e.theirs + ' <span class="dim">(you: ' + (e.mine || 'no level') + ')</span>').join(', ')
+    rows.push(['Ahead of you', edges.length ? edges.map(e => esc(e.tag) + ' ' + e.theirs + ' <span class="dim">(you: ' + (e.mine || 'no rating') + ')</span>').join(', ')
                                             : 'no common topic near your level']);
     if (row) rows.push(['Duels', row.wins + ' won, ' + row.losses + ' lost' + (row.passedAt ? '. Passed on ' + localDate(row.passedAt) : '')]);
     return '<div class="scout" style="--rk:var(--rk' + L.rankOf(rating).color + ')"><p class="ftitle"><span class="rk">' + esc(info.handle) +
       '</span>@codeforces</p>' + kv(rows) + '</div>' +
       acts(row ? runBtn('duel ' + info.handle) : runBtn('rival add ' + info.handle),
            edges.length ? fillBtn('train with ' + edges.slice(0, 3).map(e => e.tag).join(', ')) : '') +
-      ln('Ahead of you: common topics near your level where the topic level of ' + esc(info.handle) + ' is 200 or more above your topic level. ' +
+      ln('Ahead of you: common topics near your level where the topic rating of ' + esc(info.handle) + ' is 200 or more above your topic rating. ' +
          'Both topic levels count all solves.', 'dim small');
   }
 
@@ -1964,7 +1980,7 @@
       ex: ['duel', 'duel check', 'duel drop'] },
     { name: 'duels', group: 'rivals', run: cmdDuels, desc: 'List your duels.' },
     { name: 'fetch', group: 'see', run: cmdFetch, desc: 'Show the banner with your Codeforces numbers.' },
-    { name: 'topics', group: 'see', args: '[all]', run: cmdTopics, desc: 'Show your practice rating and your topics: strong, on level, gaps, start next.' },
+    { name: 'topics', group: 'see', args: '[all]', run: cmdTopics, desc: 'Show your practice rating and your rating in each topic.' },
     { name: 'progress', group: 'see', run: cmdProgress, desc: 'Show your solves by rating and by topic.' },
     { name: 'cp4', group: 'see', args: '[chapter | section | category]', run: cmdCp4, desc: 'Show the problem list of CP4 Book 1, with a check box for each problem.',
       more: ['cp4 shows the chapters and the sections. cp4 1.4 shows one section. cp4 1.4a shows one category.',
@@ -2099,7 +2115,7 @@
       dl.setAttribute('aria-label', 'A duel against ' + duel.rival + ' is open. Show the duel.');
     }
     u.style.setProperty('--rk', 'var(--rk' + L.rankOf(data.rating).color + ')');
-    u.innerHTML = '<b>' + esc(state.handle) + '</b>' + (data.subs ? ' ' + L.roundLevel(currentLevel()) : '');
+    u.innerHTML = '<b>' + esc(state.handle) + '</b>' + (data.rating ? ' ' + data.rating : '');
     const n = openQuests().length, due = state.marks.filter(m => !m.doneAt && m.dueAt <= nowSec()).length;
     d.textContent = 'desk ' + n + '/' + state.maxOpen;
     d.setAttribute('aria-label', 'Desk: ' + n + ' of ' + state.maxOpen + ' places in use. Show the desk.');

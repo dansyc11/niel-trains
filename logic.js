@@ -122,19 +122,52 @@
        solved  clean solves in the period        recent  solves in the last 30 days
        failed  problems tried and never solved   notClean  solves marked hint or spoiled
        freqNext, commonNext   the same for problems rated level+400 .. level+700 (the next band)
-       rating  practice rating of the topic: the mean of your 3 highest-rated clean solves in the period.
-               null with fewer than 3. floor is the lowest of the 3: a clean solve above it raises the rating.
-       group   strong (rating >= level+200) | level (rating >= level-100) | gap (common, lower or no rating)
-               | next (common only in the next band) | rare
+       rating  practice rating of the topic, on the Codeforces scale. null with no result.
+       n       results in the topic        wins  results with a solve (also with hint level 1)
+       delta   change of the rating in the last inp.compareDays days (null if there is no older rating)
+       group   strong (3 or more solves, 75 or more above your practice rating) | level (within 75)
+               | gap (common, and lower or fewer than 3 solves) | next (common only in the next band) | rare
        score   weakness. Higher = weaker.
-     report.practice is the same number for all topics together, from your 10 highest-rated clean solves. */
+     report.practice = { rating, n, delta }: the same for all topics together.
 
-  // The mean of the k highest ratings. With fewer than k ratings there is no rating yet.
-  function practiceOf(ratings, k) {
-    const rs = ratings.slice().sort((x, y) => y - x).slice(0, k);
-    if (rs.length < k) return { rating: null, n: ratings.length, need: k, floor: null };
-    return { rating: Math.round(rs.reduce((a, b) => a + b, 0) / k), n: ratings.length, need: k, floor: rs[k - 1] };
+     The practice rating is the rating R that fits your results best:
+       each result has a problem rating r, a score s and a weight w.
+       expected score  P = 1 / (1 + 10^((r - R) / 400))     (the Elo formula)
+       R solves        sum of w * (s - P) + prior = 0
+     Results:
+       a problem of a contest that you took (live or virtual): s = 1 if you solved it in the contest, else 0. w = 1.
+       a solve outside a contest: s = 1 clean, 0.5 hint level 1, 0.25 hint level 2, 0 spoiled.
+       a problem that you tried outside a contest and did not solve: s = 0.
+       Outside a contest there is no clock. Thus such a result counts as a problem 200 easier, with w = 0.5,
+       and each next one counts 15% less: your hardest solves first, and your easiest failures first.
+       w also halves each 180 days. Problems in inp.pending (open on your desk) do not count.
+     The prior is one win and one loss against a problem at the anchor. The anchor is your contest rating
+     for the total, and your total practice rating for a topic. */
+
+  const expectScore = (R, r) => 1 / (1 + Math.pow(10, (r - R) / 400));
+  const NO_CLOCK = 200, PRACTICE_WEIGHT = 0.5, NEXT_COUNTS = 0.85;
+
+  // Practice results lose weight by rank, so that many easy solves cannot lift the rating without limit.
+  function ranked(list) {
+    const out = list.filter(o => !o.practice);
+    const wins = list.filter(o => o.practice && o.s >= 0.5).sort((a, b) => (b.r - a.r) || (b.w - a.w));
+    const losses = list.filter(o => o.practice && o.s < 0.5).sort((a, b) => (a.r - b.r) || (b.w - a.w));
+    for (const group of [wins, losses]) group.forEach((o, k) => out.push({ r: o.r, s: o.s, w: o.w * Math.pow(NEXT_COUNTS, k) }));
+    return out;
   }
+
+  // obs: [{ r, s, w }]. Gives the rating where the expected score is the same as the real score.
+  function fitRating(obs, anchor, prior) {
+    let lo = 0, hi = 4000;
+    for (let i = 0; i < 40; i++) {
+      const R = (lo + hi) / 2;
+      let f = prior * (1 - 2 * expectScore(R, anchor));
+      for (const o of obs) f += o.w * (o.s - expectScore(R, o.r));
+      if (f > 0) lo = R; else hi = R;
+    }
+    return Math.round((lo + hi) / 2);
+  }
+
   function topicReport(inp) {
     const problems = inp.problems || [], subs = inp.subs || [], results = inp.results || {};
     const now = inp.now, windowDays = inp.windowDays || 0;
@@ -157,18 +190,62 @@
     }
 
     const byKey = new Map(problems.map(p => [p.key, p]));
-    const firstOk = new Map(), tried = new Map();
+    const firstOk = new Map(), tried = new Map(), lastTry = new Map(), contests = new Map();
     for (const s of subs) {
       if (!tried.has(s.key)) tried.set(s.key, byKey.get(s.key) || s.p);
       if (s.ok && (!firstOk.has(s.key) || s.time < firstOk.get(s.key))) firstOk.set(s.key, s.time);
+      lastTry.set(s.key, Math.max(lastTry.get(s.key) || 0, s.time));
+      if (!CONTEST_TYPES[s.ptype] || (inp.unfinished && inp.unfinished.has(s.p.cid))) continue;
+      const c = contests.get(s.p.cid) || { time: s.time, ok: new Set(), sent: new Set() };
+      c.time = Math.min(c.time, s.time);
+      c.sent.add(s.key);
+      if (s.ok) c.ok.add(s.key);
+      contests.set(s.p.cid, c);
     }
+
+    // ---- the results for the practice rating
+    const half = (inp.halfLifeDays || 180) * DAY, pending = inp.pending || null;
+    const anchor = inp.anchor != null ? inp.anchor : lo;
+    const byCid = new Map();
+    for (const p of problems) { if (contests.has(p.cid)) { if (!byCid.has(p.cid)) byCid.set(p.cid, []); byCid.get(p.cid).push(p); } }
+
+    function model(asOf) {
+      const all = [], byTag = {};
+      const add = (p, score, practice, time) => {
+        if (!p || p.rating == null || time > asOf || (windowDays && time < asOf - windowDays * DAY)) return;
+        const o = { r: p.rating - (practice ? NO_CLOCK : 0), s: score, practice: practice,
+                    w: (practice ? PRACTICE_WEIGHT : 1) * Math.pow(0.5, (asOf - time) / half) };
+        all.push(o);
+        for (const t of new Set(p.tags)) if (!IGNORED_TAGS[t]) (byTag[t] || (byTag[t] = [])).push(o);
+      };
+      for (const [cid, c] of contests) {
+        const list = new Map((byCid.get(cid) || []).map(p => [p.key, p]));
+        for (const key of c.sent) if (!list.has(key)) list.set(key, tried.get(key));
+        for (const [key, p] of list) if (!(pending && pending.has(key))) add(p, c.ok.has(key) ? 1 : 0, false, c.time);
+      }
+      for (const [key, p] of tried) {
+        if ((pending && pending.has(key)) || (inp.unfinished && inp.unfinished.has(p.cid))) continue;
+        const c = contests.get(p.cid);
+        if (c && c.ok.has(key)) continue;                       // the contest result covers it
+        const res = results[key], when = firstOk.get(key);
+        if (when != null) add(p, res === 'spoiled' ? 0 : res === 'hint2' ? 0.25 : res === 'hint1' ? 0.5 : 1, true, when);
+        else if (!c || !c.sent.has(key)) add(p, 0, true, lastTry.get(key));
+      }
+      const total = all.length ? fitRating(ranked(all), anchor, 1) : null, tags = {};
+      for (const t of Object.keys(byTag)) {
+        tags[t] = { rating: fitRating(ranked(byTag[t]), total, 1), n: byTag[t].length, wins: byTag[t].filter(o => o.s >= 0.5).length };
+      }
+      return { rating: total, n: all.length, tags: tags };
+    }
+    const cur = model(now), old = inp.compareDays ? model(now - inp.compareDays * DAY) : null;
+    const change = (a, b) => (a != null && b != null) ? a - b : null;
+    const P = cur.rating;
 
     const winStart = windowDays ? now - windowDays * DAY : -Infinity;
     const recentStart = now - 30 * DAY;
     const acc = {};
     const A = t => acc[t] || (acc[t] = { solvedAll: 0, solvedWin: 0, ratings: [], recent: 0, failed: 0, notClean: 0 });
     let total = 0;
-    const allRatings = [];
     for (const [key, p] of tried) {
       const tags = p.tags.filter(t => !IGNORED_TAGS[t]);
       for (const t of tags) allTags[t] = 1;
@@ -177,7 +254,7 @@
       const res = results[key];
       const strength = !res || res === 'clean';
       const inWin = when >= winStart;
-      if (strength && inWin) { total++; if (p.rating != null) allRatings.push(p.rating); }
+      if (strength && inWin) total++;
       for (const t of tags) {
         const a = A(t);
         if (when >= recentStart) a.recent++;
@@ -194,22 +271,23 @@
       const common = freq >= minFreq;
       const freqNext = nextSize ? (countNext[tag] || 0) / nextSize : 0;
       const commonNext = freqNext >= minFreq;
-      const pr = practiceOf(a.ratings, 3), rating = pr.rating;
-      const group = rating != null && rating >= lo + 200 ? 'strong' : rating != null && rating >= lo - 100 ? 'level'
+      const m = cur.tags[tag] || { rating: null, n: 0, wins: 0 }, rating = m.rating, sure = rating != null && m.wins >= 3;
+      const group = sure && rating >= P + 75 ? 'strong' : sure && rating > P - 75 ? 'level'
         : common ? 'gap' : commonNext ? 'next' : 'rare';
       const cover = (total && freq) ? (a.solvedWin / total) / freq : 0;
       const lack = Math.max(0, 1 - Math.min(cover, 1));
       const attempts = a.solvedAll + a.failed + a.notClean;
       const failRate = attempts >= 3 ? (a.failed + a.notClean) / attempts : 0;
-      const gap = rating == null ? 0 : clamp((lo - rating) / 400, 0, 1);
+      const gap = rating == null ? 0 : clamp((P - rating) / 400, 0, 1);
       const score = common ? lack + 0.5 * failRate + 0.3 * gap : 0;
       return { tag: tag, freq: freq, common: common, freqNext: freqNext, commonNext: commonNext,
                solved: a.solvedWin, solvedAll: a.solvedAll, recent: a.recent, failed: a.failed, notClean: a.notClean,
-               rating: rating, floor: pr.floor, n: pr.n, group: group, score: score };
+               rating: rating, n: m.n, wins: m.wins, delta: old ? change(rating, (old.tags[tag] || {}).rating) : null, group: group, score: score };
     });
     topics.sort((x, y) => (Number(y.common) - Number(x.common)) || (y.score - x.score) ||
                           (y.freq - x.freq) || cmp(x.tag, y.tag));
-    return { level: lo, hi: hi, nextLo: nextLo, nextHi: nextHi, total: total, practice: practiceOf(allRatings, 10), topics: topics };
+    return { level: lo, hi: hi, nextLo: nextLo, nextHi: nextHi, total: total, topics: topics,
+             practice: { rating: P, n: cur.n, delta: old ? change(P, old.rating) : null } };
   }
 
   // Weak topics for training. include and exclude are Sets of topic names.
@@ -711,7 +789,7 @@
 
   return {
     countryUsers: countryUsers, spread: spread, lockBox: lockBox, openBox: openBox, textToB64: textToB64, b64ToText: b64ToText,
-    targetBand: targetBand, practiceOf: practiceOf,
+    targetBand: targetBand, fitRating: fitRating,
     parseUva: parseUva, uvaProblemFromApi: uvaProblemFromApi, uvaSubFromApi: uvaSubFromApi,
     cp4Items: cp4Items, cp4Stats: cp4Stats, cp4Find: cp4Find,
     WINS_TO_PASS: WINS_TO_PASS, OFFICIAL: OFFICIAL, VIRTUAL: VIRTUAL, same: same, winChance: winChance,
