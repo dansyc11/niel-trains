@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>niel-trains</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400..800&display=swap" rel="stylesheet">
+<style>
+  /* The colors of the Codeforces ranks are the palette: --rk0 gray (newbie) to --rk6 red (grandmaster). */
+  :root {
+    --bg: #141B26; --panel: #1B2532; --fg: #DCE5F0; --dim: #8FA0B5; --line: #2B394B;
+    --accent: #FFD43B; --mark: #FFD43B; --mark-ink: #18212C;
+    --ok: #5FD08A; --err: #FF8A8F; --focus: #9CC2FF; --link: #9CC2FF;
+    --rk0: #A9B0BB; --rk1: #5FD08A; --rk2: #3FD0C4; --rk3: #7AA7FF; --rk4: #D58AE0; --rk5: #FFB04D; --rk6: #FF7B7F;
+  }
+  html[data-theme="light"] {
+    --bg: #F2F5F9; --panel: #FFFFFF; --fg: #16233B; --dim: #55657C; --line: #C9D3E0;
+    --accent: #7A5900;
+    --ok: #157F3C; --err: #B4232A; --focus: #1D4ED8; --link: #1D4ED8;
+    --rk0: #5E6672; --rk1: #157F3C; --rk2: #04756E; --rk3: #1D4ED8; --rk4: #8E2DA0; --rk5: #A85A00; --rk6: #C0262D;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--bg); color: var(--fg); -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0 auto; max-width: 108ch; min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column;
+    /* The Nerd Font of your device comes first. JetBrains Mono from the web has the same letters, without the icons. */
+    font: 400 15px/1.55 "JetBrainsMono Nerd Font", "JetBrainsMono NF", "JetBrainsMono Nerd Font Mono", "JetBrains Mono",
+          ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-variant-ligatures: none;
+  }
+  @media (max-width: 640px) { body { font-size: 13.5px; } }
+  a { color: var(--link); text-underline-offset: 2px; }
+  b { font-weight: 700; }
+  button { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 3px; }
+  ::selection { background: var(--mark); color: var(--mark-ink); }
+
+  /* ------------------------------------------------------------ status line */
+  #top {
+    position: sticky; top: 0; z-index: 5; display: flex; align-items: stretch; background: var(--bg);
+    border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden;
+  }
+  .seg { padding: .45rem 1.4ch; border: 0; background: none; color: var(--dim); cursor: pointer; flex: none; }
+  .seg + .seg { border-left: 1px solid var(--line); }
+  .seg:hover { color: var(--fg); }
+  .seg.app { background: var(--mark); color: var(--mark-ink); font-weight: 800; }
+  .seg.user b { color: var(--rk, var(--fg)); }
+  .seg.due { color: var(--accent); font-weight: 700; }
+  .seg.grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+  #st-duel { flex: 0 1 auto; min-width: 7ch; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 640px) { .seg { padding: .45rem 1ch; } }
+
+  /* ----------------------------------------------------------------- output */
+  #out { flex: 1; padding: .9rem 1.6ch 1.2rem; min-width: 0; }
+  .entry { margin: 0 0 1.25rem; scroll-margin-top: 3.1rem; }
+  .echo { font-weight: 700; overflow-wrap: anywhere; }
+  .echo .ps { color: var(--accent); margin-right: 1ch; }
+  .ln, .h { margin: .2rem 0; overflow-wrap: anywhere; }
+  .h { margin-top: .9rem; font-weight: 800; }
+  .dim { color: var(--dim); }
+  .err { color: var(--err); }
+  .good { color: var(--ok); }
+  .small { font-size: .93em; }
+
+  /* A command that you can select. It shows the text that you can also type. */
+  .c {
+    color: var(--accent); background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+    padding: .1rem 1ch; cursor: pointer; white-space: nowrap; line-height: 1.5;
+  }
+  .c:hover { border-color: var(--accent); }
+  .c[disabled] { opacity: .5; cursor: default; }
+  .acts { display: flex; flex-wrap: wrap; gap: .45rem; margin: .45rem 0; align-items: center; }
+  @media (pointer: coarse) { .c { padding: .38rem 1.2ch; } }
+
+  .kv { margin: .35rem 0; display: grid; grid-template-columns: max-content 1fr; column-gap: 2ch; row-gap: .05rem; }
+  .kv > div { display: contents; }
+  .kv dt { color: var(--accent); font-weight: 700; }
+  .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+
+  /* ----------------------------------------------------------------- banner */
+  .fetch { display: grid; grid-template-columns: max-content 1fr; gap: .9rem 4ch; align-items: start; margin: .5rem 0 .7rem; }
+  .logo { margin: .15rem 0 0; color: var(--rk); font: inherit; font-weight: 800; font-size: 1.3em; line-height: 1.18; }
+  .ftitle { margin: 0; font-weight: 800; }
+  .ftitle .rk, .rk { color: var(--rk); }
+  .frule { margin: 0; color: var(--dim); overflow: hidden; white-space: nowrap; }
+  .odds { margin: .7rem 0 0; }
+  .meter { display: inline-flex; gap: 2px; vertical-align: -0.12em; margin-right: 1.2ch; }
+  .meter i { width: .85ch; height: 1em; background: var(--line); border-radius: 1px; }
+  .meter i.on { background: var(--accent); }
+  @media (max-width: 640px) { .fetch { grid-template-columns: 1fr; gap: .5rem; } .logo { font-size: 1.1em; } }
+  .rise > *, .rise .kv dt, .rise .kv dd { animation: rise .28s ease-out both; animation-delay: calc(var(--i, 0) * 30ms); }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  /* ---------------------------------------------------------------- problem */
+  .prob { border-left: 3px solid var(--line); padding: .05rem 0 .05rem 1.6ch; margin: .55rem 0; }
+  .prob.acc { border-left-color: var(--ok); }
+  .prob.fin { border-left-color: var(--mark); }
+  .pname { margin: 0; overflow-wrap: anywhere; }
+  a.pl { color: var(--fg); text-decoration: none; font-weight: 700; }
+  a.pl:hover { text-decoration: underline; }
+  a.pl b { color: var(--link); margin-right: 1ch; }
+  .seal { margin: .1rem 0; color: var(--dim); }
+  .seal i { font-style: normal; color: var(--accent); margin-right: 1ch; letter-spacing: -.04em; }
+  .open { margin: .1rem 0; display: flex; flex-wrap: wrap; column-gap: 2ch; }
+  .open .tr { background: var(--mark); color: var(--mark-ink); padding: 0 .6ch; border-radius: 3px; }
+  .unseal { animation: unseal .7s ease-out both; }
+  @keyframes unseal { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+
+  /* ------------------------------------------------------------------ lists */
+  .row { display: grid; grid-template-columns: 1fr auto; gap: .1rem 2ch; align-items: center; padding: .3rem 0; border-bottom: 1px dashed var(--line); }
+  .row .main { min-width: 0; overflow-wrap: anywhere; }
+  .star { color: var(--accent); }
+
+  .rrow { display: grid; grid-template-columns: 4ch 1fr auto; gap: .15rem 1ch; align-items: center; padding: .4rem 0; border-bottom: 1px dashed var(--line); }
+  .rrow .rmark { color: var(--dim); }
+  .rrow.next .rmark { color: var(--accent); font-weight: 800; }
+  .rrow.passed .rmark { color: var(--ok); }
+  .rrow.you .rmark { color: var(--mark-ink); background: var(--mark); font-weight: 800; text-align: center; border-radius: 3px; }
+  .rrow .racts { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
+  .rrow .rsub { grid-column: 2 / -1; color: var(--dim); overflow-wrap: anywhere; }
+  @media (max-width: 700px) {
+    .rrow { grid-template-columns: 4ch 1fr; }
+    .rrow .rsub { grid-column: 2; grid-row: 2; }
+    .rrow .racts { grid-column: 2; grid-row: 3; justify-content: flex-start; margin-top: .25rem; }
+  }
+  .scout { margin: .3rem 0 .5rem; }
+  .steps { margin: .3rem 0 .2rem; padding-left: 3ch; }
+  .dtab { display: grid; grid-template-columns: repeat(3, max-content); column-gap: 4ch; margin: .5rem 0 .3rem; }
+  .dtab .hd { color: var(--dim); }
+  .dtab .win { color: var(--ok); font-weight: 800; }
+
+  /* the CP4 list */
+  .sc { color: var(--accent); font-weight: 800; margin-right: 1ch; }
+  .cat { margin: 0 0 .3rem; }
+  .pr { display: grid; grid-template-columns: auto 1fr; gap: 0 1ch; align-items: baseline; padding: .12rem 0; overflow-wrap: anywhere; }
+  .ck { font: inherit; font-weight: 800; color: var(--dim); background: none; border: 0; padding: .1rem 0; cursor: pointer; white-space: pre; }
+  .ck:hover { color: var(--fg); }
+  .ck[aria-pressed="true"] { color: var(--ok); }
+  .ck[data-auto] { cursor: default; }
+  .pr:has(.ck[aria-pressed="true"]) a.pl { color: var(--dim); }
+  details.more { margin: .15rem 0 .2rem; }
+  details.more summary { cursor: pointer; color: var(--accent); padding: .15rem 0; width: max-content; }
+  @media (pointer: coarse) { .ck { padding: .32rem .2rem; } details.more summary { padding: .35rem 0; } }
+
+  .trow { display: grid; grid-template-columns: minmax(18ch, 1fr) auto auto; gap: .1rem 2ch; align-items: center; padding: .25rem 0; border-bottom: 1px dashed var(--line); }
+  .tstats { color: var(--dim); display: grid; grid-template-columns: 10ch 11ch 9ch 9ch 11ch; column-gap: 1ch; }
+  .tstats b { color: var(--fg); font-weight: 600; }
+  .tacts { display: flex; gap: .35rem; }
+  @media (max-width: 900px) {
+    .trow { grid-template-columns: 1fr auto; }
+    .tstats { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: wrap; column-gap: 2ch; }
+    .tstats span:empty { display: none; }
+  }
+
+  .tg { min-width: 2.6em; text-align: center; color: var(--dim); font-weight: 700; }
+  .tg[aria-pressed="true"][data-list="include"] { background: var(--ok); border-color: var(--ok); color: var(--bg); }
+  .tg[aria-pressed="true"][data-list="exclude"] { background: var(--err); border-color: var(--err); color: var(--bg); }
+  .fgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(30ch, 1fr)); gap: .3rem 3ch; margin: .5rem 0; }
+  .fchip { display: grid; grid-template-columns: auto auto 1fr; gap: .35rem; align-items: center; }
+  .fchip span { padding-left: 1ch; }
+  .fchip span { overflow-wrap: anywhere; }
+
+  .bar { display: grid; grid-template-columns: 10ch 1fr 5ch; gap: 1ch; align-items: center; }
+  .bar .bt { height: .8em; }
+  .bar .bf { display: block; height: 100%; min-width: 3px; background: var(--c); border-radius: 1px; }
+  .bar .bl { color: var(--dim); }
+
+  .help { display: grid; grid-template-columns: max-content 1fr; gap: .4rem 2ch; align-items: baseline; margin: .3rem 0 .2rem; }
+  .help .args { color: var(--fg); }
+  @media (max-width: 640px) { .help { gap: .45rem 1.5ch; } }
+
+  .code { margin: .4rem 0; padding: .6rem 1.2ch; background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+          white-space: pre-wrap; overflow-wrap: anywhere; max-height: 11rem; overflow: auto; font: inherit; user-select: all; }
+
+  /* ------------------------------------------------------------ command bar */
+  #bar { position: sticky; bottom: 0; z-index: 5; background: var(--bg); border-top: 1px solid var(--line);
+         padding: .45rem 1.2ch calc(.55rem + env(safe-area-inset-bottom)); }
+  #live { color: var(--dim); padding: 0 .4ch .35rem; }
+  #live:empty { display: none; }
+  #live::after { content: "▍"; color: var(--accent); margin-left: .6ch; animation: blink 1s steps(2, start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+  #chips, #ac { display: flex; gap: .4rem; overflow-x: auto; padding: 0 0 .45rem; scrollbar-width: none; }
+  #chips::-webkit-scrollbar, #ac::-webkit-scrollbar { display: none; }
+  #chips .c, #ac .c { flex: none; }
+  @media (pointer: fine) and (min-width: 700px) { #chips { flex-wrap: wrap; } }
+  #ac .c span { color: var(--dim); margin-left: 1ch; }
+  #prompt { display: flex; align-items: center; gap: 1ch; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 0 .3rem 0 1.4ch; }
+  #prompt:focus-within { border-color: var(--focus); }
+  #ps1 { color: var(--accent); font-weight: 800; }
+  #cmd { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--fg); font: inherit; font-size: 16px; padding: .62rem 0; caret-color: var(--accent); }
+  #cmd::placeholder { color: var(--dim); opacity: .8; }
+  #go { border: 0; background: none; color: var(--dim); padding: .4rem 1ch; cursor: pointer; border-radius: 4px; }
+  #go:hover { color: var(--fg); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rise > *, .rise .kv dt, .rise .kv dd, .unseal, #live::after { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <header id="top" aria-label="Status">
+    <button type="button" class="seg app" data-run="fetch" title="Show the banner">niel-trains</button>
+    <button type="button" class="seg user" id="st-user" data-run="fetch" hidden></button>
+    <button type="button" class="seg" id="st-desk" data-run="desk" hidden></button>
+    <button type="button" class="seg due" id="st-due" data-run="resolve" hidden></button>
+    <button type="button" class="seg due" id="st-duel" data-run="duel" hidden></button>
+    <button type="button" class="seg grow" id="st-filters" data-run="filters" hidden></button>
+  </header>
+
+  <main id="out" role="log" aria-live="polite" aria-label="Output"></main>
+
+  <footer id="bar">
+    <div id="live" role="status"></div>
+    <div id="ac" hidden></div>
+    <nav id="chips" aria-label="Common commands">
+      <button type="button" class="c" data-run="help">help</button>
+      <button type="button" class="c" data-run="suggest" data-user>suggest</button>
+      <button type="button" class="c" data-run="train" data-user>train</button>
+      <button type="button" class="c" data-run="check" data-user>check</button>
+      <button type="button" class="c" data-run="desk" data-user>desk</button>
+      <button type="button" class="c" data-run="duel" data-user>duel</button>
+      <button type="button" class="c" data-run="rival" data-user>rival</button>
+      <button type="button" class="c" data-run="cp4" data-user>cp4</button>
+      <button type="button" class="c" data-run="topics" data-user>topics</button>
+      <button type="button" class="c" data-run="progress" data-user>progress</button>
+      <button type="button" class="c" data-run="upsolve" data-user>upsolve</button>
+      <button type="button" class="c" data-run="resolve" data-user>resolve</button>
+    </nav>
+    <form id="prompt" autocomplete="off">
+      <label for="cmd" id="ps1">$</label>
+      <input id="cmd" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+             enterkeyhint="go" placeholder="type a command, or help" aria-describedby="live">
+      <button id="go" aria-label="Run the command">run</button>
+    </form>
+  </footer>
+
+  <script src="cp4.js"></script>
+  <script src="logic.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
