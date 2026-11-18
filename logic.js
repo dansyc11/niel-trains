@@ -22,6 +22,11 @@
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   const roundLevel = level => clamp(Math.round(level / 100) * 100, MIN_RATING, MAX_RATING);
   const targetRating = (level, delta) => clamp(Math.round((level + delta) / 100) * 100, MIN_RATING, MAX_RATING);
+  // The rating range for a level and two steps. Example: level 1000, +100 and +200 gives 1100 .. 1200.
+  function targetBand(level, d1, d2) {
+    const a = targetRating(level, d1), b = targetRating(level, d2 == null ? d1 : d2);
+    return { lo: Math.min(a, b), hi: Math.max(a, b) };
+  }
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
   // ------------------------------------------------------------------ data
@@ -85,14 +90,15 @@
     return true;
   }
 
-  // Picks an unseen problem at o.rating. If there is none, it tries 100 and 200 away.
+  // Picks an unseen problem rated o.lo .. o.hi (or exactly o.rating). If there is none, it tries 100 and 200 away.
   // Newer contests are a little more likely, because very old problems can have odd formats.
   function pickProblem(problems, o) {
     const rnd = o.rnd || Math.random;
+    const lo = o.lo != null ? o.lo : o.rating, hi = o.hi != null ? o.hi : o.rating;
     for (const widen of [0, 100, -100, 200, -200]) {
-      const r = o.rating + widen;
-      if (r < MIN_RATING || r > MAX_RATING) continue;
-      const pool = problems.filter(p => p.rating === r &&
+      const rLo = widen > 0 ? hi + widen : lo + widen, rHi = widen < 0 ? lo + widen : hi + widen;
+      if (rHi < MIN_RATING || rLo > MAX_RATING) continue;
+      const pool = problems.filter(p => p.rating >= rLo && p.rating <= rHi &&
         !(o.skipKeys && o.skipKeys.has(p.key)) && !(o.skipNames && o.skipNames.has(p.name)) &&
         matches(p, o.include, o.exclude, o.requireTag));
       if (!pool.length) continue;
@@ -115,22 +121,39 @@
        common  freq >= 3%. Rare topics (for example graph matchings at 1000) get no weakness score.
        solved  clean solves in the period        recent  solves in the last 30 days
        failed  problems tried and never solved   notClean  solves marked hint or spoiled
-       level   the rating where you have 3 or more clean solves at that rating or higher
-       band    above | around | below | nodata   (200 or more away from your level)
-       score   weakness. Higher = weaker. */
+       freqNext, commonNext   the same for problems rated level+400 .. level+700 (the next band)
+       rating  practice rating of the topic: the mean of your 3 highest-rated clean solves in the period.
+               null with fewer than 3. floor is the lowest of the 3: a clean solve above it raises the rating.
+       group   strong (rating >= level+200) | level (rating >= level-100) | gap (common, lower or no rating)
+               | next (common only in the next band) | rare
+       score   weakness. Higher = weaker.
+     report.practice is the same number for all topics together, from your 10 highest-rated clean solves. */
+
+  // The mean of the k highest ratings. With fewer than k ratings there is no rating yet.
+  function practiceOf(ratings, k) {
+    const rs = ratings.slice().sort((x, y) => y - x).slice(0, k);
+    if (rs.length < k) return { rating: null, n: ratings.length, need: k, floor: null };
+    return { rating: Math.round(rs.reduce((a, b) => a + b, 0) / k), n: ratings.length, need: k, floor: rs[k - 1] };
+  }
   function topicReport(inp) {
     const problems = inp.problems || [], subs = inp.subs || [], results = inp.results || {};
     const now = inp.now, windowDays = inp.windowDays || 0;
     const minFreq = inp.minFreq == null ? MIN_FREQ : inp.minFreq;
     const lo = roundLevel(inp.level), hi = Math.min(MAX_RATING, lo + 300);
+    const nextLo = lo + 400, nextHi = lo + 700;
 
-    let bandSize = 0;
-    const count = {}, allTags = {};
+    let bandSize = 0, nextSize = 0;
+    const count = {}, countNext = {}, allTags = {};
     for (const p of problems) {
       for (const t of p.tags) if (!IGNORED_TAGS[t]) allTags[t] = 1;
-      if (p.rating == null || p.rating < lo || p.rating > hi) continue;
-      bandSize++;
-      for (const t of new Set(p.tags)) if (!IGNORED_TAGS[t]) count[t] = (count[t] || 0) + 1;
+      if (p.rating == null) continue;
+      if (p.rating >= lo && p.rating <= hi) {
+        bandSize++;
+        for (const t of new Set(p.tags)) if (!IGNORED_TAGS[t]) count[t] = (count[t] || 0) + 1;
+      } else if (p.rating >= nextLo && p.rating <= nextHi) {
+        nextSize++;
+        for (const t of new Set(p.tags)) if (!IGNORED_TAGS[t]) countNext[t] = (countNext[t] || 0) + 1;
+      }
     }
 
     const byKey = new Map(problems.map(p => [p.key, p]));
@@ -145,6 +168,7 @@
     const acc = {};
     const A = t => acc[t] || (acc[t] = { solvedAll: 0, solvedWin: 0, ratings: [], recent: 0, failed: 0, notClean: 0 });
     let total = 0;
+    const allRatings = [];
     for (const [key, p] of tried) {
       const tags = p.tags.filter(t => !IGNORED_TAGS[t]);
       for (const t of tags) allTags[t] = 1;
@@ -153,7 +177,7 @@
       const res = results[key];
       const strength = !res || res === 'clean';
       const inWin = when >= winStart;
-      if (strength && inWin) total++;
+      if (strength && inWin) { total++; if (p.rating != null) allRatings.push(p.rating); }
       for (const t of tags) {
         const a = A(t);
         if (when >= recentStart) a.recent++;
@@ -168,21 +192,24 @@
       const a = acc[tag] || zero;
       const freq = bandSize ? (count[tag] || 0) / bandSize : 0;
       const common = freq >= minFreq;
-      const rs = a.ratings.slice().sort((x, y) => y - x);
-      const level = rs.length >= 3 ? rs[2] : null;
-      const band = level == null ? 'nodata' : level >= lo + 200 ? 'above' : level <= lo - 200 ? 'below' : 'around';
+      const freqNext = nextSize ? (countNext[tag] || 0) / nextSize : 0;
+      const commonNext = freqNext >= minFreq;
+      const pr = practiceOf(a.ratings, 3), rating = pr.rating;
+      const group = rating != null && rating >= lo + 200 ? 'strong' : rating != null && rating >= lo - 100 ? 'level'
+        : common ? 'gap' : commonNext ? 'next' : 'rare';
       const cover = (total && freq) ? (a.solvedWin / total) / freq : 0;
       const lack = Math.max(0, 1 - Math.min(cover, 1));
       const attempts = a.solvedAll + a.failed + a.notClean;
       const failRate = attempts >= 3 ? (a.failed + a.notClean) / attempts : 0;
-      const gap = level == null ? 0 : clamp((lo - level) / 400, 0, 1);
+      const gap = rating == null ? 0 : clamp((lo - rating) / 400, 0, 1);
       const score = common ? lack + 0.5 * failRate + 0.3 * gap : 0;
-      return { tag: tag, freq: freq, common: common, solved: a.solvedWin, solvedAll: a.solvedAll,
-               recent: a.recent, failed: a.failed, notClean: a.notClean, level: level, band: band, score: score };
+      return { tag: tag, freq: freq, common: common, freqNext: freqNext, commonNext: commonNext,
+               solved: a.solvedWin, solvedAll: a.solvedAll, recent: a.recent, failed: a.failed, notClean: a.notClean,
+               rating: rating, floor: pr.floor, n: pr.n, group: group, score: score };
     });
     topics.sort((x, y) => (Number(y.common) - Number(x.common)) || (y.score - x.score) ||
                           (y.freq - x.freq) || cmp(x.tag, y.tag));
-    return { level: lo, hi: hi, total: total, topics: topics };
+    return { level: lo, hi: hi, nextLo: nextLo, nextHi: nextHi, total: total, practice: practiceOf(allRatings, 10), topics: topics };
   }
 
   // Weak topics for training. include and exclude are Sets of topic names.
@@ -206,14 +233,17 @@
   }
 
   // The lists for the report card.
+  // The four topic groups for the banner and the topics command. exclude is a Set of topic names.
   function summary(report, exclude) {
-    const withLevel = report.topics.filter(t => t.level != null).sort((a, b) => (b.level - a.level) || cmp(a.tag, b.tag));
+    const of = g => report.topics.filter(t => t.group === g);
+    const keep = t => !(exclude && exclude.has(t.tag));
+    const byRating = (a, b) => (b.rating - a.rating) || cmp(a.tag, b.tag);
     return {
-      above: withLevel.filter(t => t.band === 'above'),
-      around: withLevel.filter(t => t.band === 'around'),
-      below: withLevel.filter(t => t.band === 'below'),
-      noRecent: report.topics.filter(t => t.common && t.recent === 0),
-      gaps: weakTags(report, null, exclude, 3).filter(t => t.score > 0)
+      practice: report.practice,
+      strong: of('strong').sort(byRating),
+      level: of('level').sort(byRating),
+      gaps: of('gap').filter(keep).sort((a, b) => (b.score - a.score) || (b.freq - a.freq) || cmp(a.tag, b.tag)).slice(0, 6),
+      next: of('next').filter(keep).sort((a, b) => ((b.freqNext - b.freq) - (a.freqNext - a.freq)) || cmp(a.tag, b.tag)).slice(0, 5)
     };
   }
 
@@ -529,9 +559,9 @@
   function topicEdges(mine, theirs, top) {
     const my = {};
     for (const t of mine.topics) my[t.tag] = t;
-    return theirs.topics.filter(t => t.level != null && my[t.tag] && my[t.tag].common &&
-        (my[t.tag].level == null || t.level - my[t.tag].level >= 200))
-      .map(t => ({ tag: t.tag, theirs: t.level, mine: my[t.tag].level }))
+    return theirs.topics.filter(t => t.rating != null && my[t.tag] && my[t.tag].common &&
+        (my[t.tag].rating == null || t.rating - my[t.tag].rating >= 200))
+      .map(t => ({ tag: t.tag, theirs: t.rating, mine: my[t.tag].rating }))
       .sort((a, b) => ((b.theirs - (b.mine || 0)) - (a.theirs - (a.mine || 0))) || cmp(a.tag, b.tag))
       .slice(0, top || 5);
   }
@@ -594,7 +624,16 @@
     const out = { errors: [] };
     const parts = String(rest || '').toLowerCase().split(/\b(without|with)\b/);
     const head = parts[0].trim();
+    const range = /^([+-]?\d+)\s*\.\.\s*([+-]?\d+)$/.exec(head);
     if (head === 'level') out.delta = 0;
+    else if (range && /^[+-]/.test(range[1])) {
+      out.delta = Math.min(Number(range[1]), Number(range[2]));
+      out.deltaHi = Math.max(Number(range[1]), Number(range[2]));
+    } else if (range) {
+      const a = Math.min(Number(range[1]), Number(range[2])), b = Math.max(Number(range[1]), Number(range[2]));
+      if (a >= MIN_RATING && b <= MAX_RATING) { out.exact = Math.round(a / 100) * 100; out.exactHi = Math.round(b / 100) * 100; }
+      else out.errors.push('A rating is from ' + MIN_RATING + ' to ' + MAX_RATING + '.');
+    }
     else if (/^[+-]\d+$/.test(head)) out.delta = Number(head);
     else if (/^\d+$/.test(head)) {
       const n = Number(head);
@@ -610,7 +649,69 @@
     return out;
   }
 
+  // ------------------------------------------------------------ rival finder
+
+  // Users of one country from user.ratedList, lowest rating first. Only the handle and the ratings stay.
+  function countryUsers(list, country) {
+    const want = String(country || '').trim().toLowerCase();
+    return (list || []).filter(u => u && u.handle && u.rating > 0 && String(u.country || '').toLowerCase() === want)
+      .map(u => ({ handle: u.handle, rating: u.rating, maxRating: u.maxRating || u.rating }))
+      .sort((a, b) => (a.rating - b.rating) || cmp(a.handle, b.handle));
+  }
+
+  // Up to n users rated lo .. hi, spread over the ratings. skip is a Set of lower-case handles.
+  function spread(users, lo, hi, n, skip) {
+    const pool = (users || []).filter(u => u.rating >= lo && u.rating <= hi && !(skip && skip.has(u.handle.toLowerCase())));
+    if (pool.length <= n) return pool;
+    const a = pool[0].rating, b = pool[pool.length - 1].rating, used = new Set(), out = [];
+    for (let i = 0; i < n; i++) {
+      const t = a + i * (b - a) / (n - 1);
+      let best = null;
+      for (const u of pool) if (!used.has(u.handle) && (!best || Math.abs(u.rating - t) < Math.abs(best.rating - t))) best = u;
+      used.add(best.handle); out.push(best);
+    }
+    return out.sort((x, y) => (x.rating - y.rating) || cmp(x.handle, y.handle));
+  }
+
+  // ----------------------------------------------------------------- lock
+
+  /* The password lock. lockBox encrypts a secret (the GitHub key) with a password:
+     PBKDF2-SHA256 makes an AES-256 key from the password, and AES-GCM encrypts the secret.
+     openBox gives the secret back, or null if the password is wrong. */
+  const webCrypto = () => (typeof crypto !== 'undefined' && crypto.subtle) ? crypto : require('crypto').webcrypto;
+  const b64 = bytes => btoa(String.fromCharCode.apply(null, bytes));
+  const unb64 = text => Uint8Array.from(atob(text), c => c.charCodeAt(0));
+
+  async function boxKey(password, salt, iter) {
+    const C = webCrypto();
+    const base = await C.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
+    return C.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: salt, iterations: iter }, base,
+                              { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+
+  async function lockBox(secret, password, iter) {
+    const C = webCrypto(), salt = C.getRandomValues(new Uint8Array(16)), iv = C.getRandomValues(new Uint8Array(12));
+    iter = iter || 600000;
+    const key = await boxKey(password, salt, iter);
+    const box = await C.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(secret));
+    return { v: 1, salt: b64(salt), iv: b64(iv), iter: iter, box: b64(new Uint8Array(box)) };
+  }
+
+  async function openBox(lock, password) {
+    try {
+      const key = await boxKey(password, unb64(lock.salt), lock.iter);
+      const plain = await webCrypto().subtle.decrypt({ name: 'AES-GCM', iv: unb64(lock.iv) }, key, unb64(lock.box));
+      return new TextDecoder().decode(plain);
+    } catch (e) { return null; }
+  }
+
+  // Text to and from base64 with UTF-8, for the GitHub contents API.
+  const textToB64 = text => { const u = new TextEncoder().encode(text); let out = ''; for (let i = 0; i < u.length; i += 0x8000) out += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(out); };
+  const b64ToText = text => new TextDecoder().decode(unb64(String(text).replace(/\s/g, '')));
+
   return {
+    countryUsers: countryUsers, spread: spread, lockBox: lockBox, openBox: openBox, textToB64: textToB64, b64ToText: b64ToText,
+    targetBand: targetBand, practiceOf: practiceOf,
     parseUva: parseUva, uvaProblemFromApi: uvaProblemFromApi, uvaSubFromApi: uvaSubFromApi,
     cp4Items: cp4Items, cp4Stats: cp4Stats, cp4Find: cp4Find,
     WINS_TO_PASS: WINS_TO_PASS, OFFICIAL: OFFICIAL, VIRTUAL: VIRTUAL, same: same, winChance: winChance,

@@ -31,7 +31,7 @@
   function lsDel(k) { try { localStorage.removeItem(k); } catch (e) { /* no storage */ } }
 
   function freshState() {
-    return { v: 1, handle: '', levelOverride: null, ratingMode: 'delta', delta: 200, exact: 1200,
+    return { v: 1, handle: '', levelOverride: null, ratingMode: 'delta', delta: 100, deltaHi: 200, exact: 1200, exactHi: null, country: '',
              include: [], exclude: [], maxOpen: 3, windowDays: 365, quests: [], marks: [], rivals: [], duels: [], uva: null, cp4: {}, nextId: 1 };
   }
 
@@ -41,6 +41,12 @@
     for (const k of Object.keys(s)) if (raw[k] !== undefined) s[k] = raw[k];
     for (const k of ['include', 'exclude', 'quests', 'marks', 'rivals', 'duels']) if (!Array.isArray(s[k])) s[k] = [];
     s.handle = String(s.handle || '');
+    if (raw.deltaHi === undefined) {                         // data from before the rating range
+      if (raw.delta === undefined || Number(raw.delta) === 200) { s.delta = 100; s.deltaHi = 200; } else s.deltaHi = null;
+    }
+    s.deltaHi = s.deltaHi == null ? null : Number(s.deltaHi) || 0;
+    s.exactHi = Number(s.exactHi) || null;
+    s.country = String(s.country || '');
     s.delta = Number(s.delta) || 0;
     s.exact = Number(s.exact) || 1200;
     s.maxOpen = Math.max(1, Math.min(5, Number(s.maxOpen) || 3));
@@ -59,9 +65,10 @@
 
   // The theme and the command history stay on this device. They are not in the export code.
   function cleanTerm(raw) {
-    const t = { theme: 'dark', hist: [], jsonp: false };
+    const t = { theme: 'dark', hist: [], jsonp: false, stay: false };
     if (raw && typeof raw === 'object') {
       t.jsonp = raw.jsonp === true;
+      t.stay = raw.stay === true;
       if (['dark', 'light', 'auto'].indexOf(raw.theme) >= 0) t.theme = raw.theme;
       if (Array.isArray(raw.hist)) t.hist = raw.hist.filter(x => typeof x === 'string').slice(-50);
     }
@@ -70,22 +77,156 @@
 
   let state = cleanState(lsGet(K_STATE));
   const term = cleanTerm(lsGet(K_TERM));
-  const save = () => lsSet(K_STATE, state);
+  const save = () => { const ok = lsSet(K_STATE, state); queuePush(); return ok; };
   const saveTerm = () => lsSet(K_TERM, term);
 
   const data = { problems: null, byKey: new Map(), tags: [], subs: null, rating: null, maxRating: null, unfinished: null,
                  durations: {}, rivalSubs: {}, uvaSubs: null, uvaName: '', uvaList: null };
   const ui = { busy: false };
 
+  // ---------------------------------------------------------- lock and sync
+
+  /* lock.js sets window.NT_LOCK: the place of your data on GitHub, and your GitHub key, encrypted with your password.
+     Without lock.js the site has no password, and your data stays in this browser. */
+  const LOCK = window.NT_LOCK && window.NT_LOCK.box ? window.NT_LOCK : null;
+  const K_TOKEN = 'nt.key.v1', K_DIRTY = 'nt.dirty.v1', K_FIND = 'cfcoach.find.v1';
+  const SYNC_MS = typeof window.NT_SYNC_MS === 'number' ? window.NT_SYNC_MS : 2500;
+  const sync = { token: null, sha: null, status: 'off', error: '', at: 0, timer: null, busy: false, again: false };
+  let locked = false;
+
+  function readToken() {
+    try { return sessionStorage.getItem(K_TOKEN) || localStorage.getItem(K_TOKEN) || null; } catch (e) { return null; }
+  }
+  // The open key stays in this tab. With "stay on", it also stays in this browser.
+  function storeToken() {
+    try {
+      sessionStorage.setItem(K_TOKEN, sync.token);
+      if (term.stay) localStorage.setItem(K_TOKEN, sync.token); else localStorage.removeItem(K_TOKEN);
+    } catch (e) { /* no storage */ }
+  }
+  function dropToken() {
+    try { sessionStorage.removeItem(K_TOKEN); localStorage.removeItem(K_TOKEN); } catch (e) { /* no storage */ }
+    sync.token = null;
+  }
+
+  async function gh(method, body, keepalive) {
+    let res;
+    try {
+      res = await fetch('https://api.github.com/repos/' + LOCK.owner + '/' + LOCK.repo + '/contents/' + LOCK.path, {
+        method: method, cache: 'no-store', keepalive: !!keepalive, body: body ? JSON.stringify(body) : undefined,
+        headers: Object.assign({ Authorization: 'Bearer ' + sync.token, Accept: 'application/vnd.github+json' },
+                               body ? { 'Content-Type': 'application/json' } : {}) });
+    } catch (e) { throw new Error('GitHub did not answer. Check your connection.'); }
+    if (res.status === 401) throw new Error('GitHub refused the key. The key can be expired. Make a new key, then run setup-lock.cjs again.');
+    if (res.status === 403) throw new Error('GitHub refused the request. The key can lack access to the repo, or GitHub limits the saves for some minutes.');
+    return res;
+  }
+
+  // Reads the saved data. found is false when the file does not exist yet.
+  async function pull() {
+    const res = await gh('GET');
+    if (res.status === 404) return { found: false, sha: null };
+    if (!res.ok) throw new Error('GitHub error ' + res.status + '.');
+    const json = await res.json();
+    let saved = null;
+    try { saved = JSON.parse(L.b64ToText(json.content)); } catch (e) { throw new Error('niel-trains cannot read ' + LOCK.path + ' on GitHub.'); }
+    return { found: true, sha: json.sha, state: saved };
+  }
+
+  // Writes the saved data. Gives false if a different device saved first.
+  async function push(keepalive) {
+    const body = { message: 'Save', content: L.textToB64(JSON.stringify(state)) };
+    if (sync.sha) body.sha = sync.sha;
+    const res = await gh('PUT', body, keepalive);
+    if (res.status === 409 || res.status === 422) return false;
+    if (res.status === 404) throw new Error('GitHub cannot find ' + LOCK.owner + '/' + LOCK.repo + ', or the key cannot write to it.');
+    if (!res.ok) throw new Error('GitHub error ' + res.status + '.');
+    sync.sha = (await res.json()).content.sha;
+    return true;
+  }
+
+  function adopt(remote) {
+    state = cleanState(remote.state);
+    lsSet(K_STATE, state);
+    lsDel(K_DIRTY);
+    sync.sha = remote.sha;
+  }
+
+  function setSync(status, error) {
+    sync.status = status;
+    sync.error = error || '';
+    if (status === 'ok') sync.at = nowSec();
+    renderSync();
+  }
+
+  function renderSync() {
+    const el = $('st-sync');
+    if (!el) return;
+    el.hidden = !LOCK || locked;
+    const text = { ok: 'saved', saving: 'saving…', error: 'not saved', off: 'no sync' }[sync.status];
+    el.textContent = text;
+    el.classList.toggle('due', sync.status === 'error');
+    el.setAttribute('aria-label', 'GitHub sync: ' + text + '. Show the sync status.');
+  }
+
+  // Each change goes to GitHub a moment later.
+  function queuePush() {
+    if (!LOCK || !sync.token || locked) return;
+    lsSet(K_DIRTY, 1);
+    setSync('saving');
+    clearTimeout(sync.timer);
+    sync.timer = setTimeout(() => { pushNow(); }, SYNC_MS);
+  }
+
+  // Saves to GitHub now. Gives 'ok', 'conflict', 'busy' or 'error'.
+  async function pushNow(keepalive) {
+    clearTimeout(sync.timer);
+    sync.timer = null;
+    if (!LOCK || !sync.token) return 'error';
+    if (sync.busy) { sync.again = true; return 'busy'; }
+    sync.busy = true;
+    let out = 'ok';
+    try {
+      if (await push(keepalive)) { lsDel(K_DIRTY); setSync('ok'); }
+      else {
+        const remote = await pull();
+        if (remote.found) adopt(remote); else sync.sha = null;
+        setSync('ok');
+        out = 'conflict';
+        notice(ln('A different device saved newer data. niel-trains loaded that data. ' +
+                  'Your last change on this device is not in it. Make the change again.', 'err'));
+        renderStatus();
+      }
+    } catch (e) { setSync('error', e.message); out = 'error'; }
+    sync.busy = false;
+    if (sync.again) { sync.again = false; queuePush(); }
+    return out;
+  }
+
+  // After the password: load the data from GitHub. A change that this device did not save yet goes to GitHub first.
+  async function syncStart() {
+    const remote = await pull();
+    const unsaved = lsGet(K_DIRTY) === 1 && !!state.handle;
+    if (remote.found && !unsaved) adopt(remote);
+    else {
+      sync.sha = remote.sha;
+      if (state.handle) {
+        if (await push()) lsDel(K_DIRTY);
+        else { const again = await pull(); if (again.found) adopt(again); }
+      }
+    }
+    setSync('ok');
+  }
+
   // --------------------------------------------------------- Codeforces API
 
   let chain = Promise.resolve(), lastCall = 0;
 
-  function api(method, params) {
+  function api(method, params, ms) {
     const run = async () => {
       const wait = GAP_MS - (Date.now() - lastCall);
       if (wait > 0) await sleep(wait);
-      try { return await call(method, params, true); } finally { lastCall = Date.now(); }
+      try { return await call(method, params, true, ms); } finally { lastCall = Date.now(); }
     };
     const p = chain.then(run, run);
     chain = p.catch(() => {});
@@ -93,7 +234,7 @@
   }
 
   // Codeforces also answers with JSONP: a script that calls a function with the data.
-  function jsonp(url) {
+  function jsonp(url, ms) {
     return new Promise((resolve, reject) => {
       const name = 'ntcb' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
       const el = document.createElement('script');
@@ -103,7 +244,7 @@
         el.remove();
         fn();
       };
-      const timer = setTimeout(() => end(() => reject(new Error('timeout')), true), 60000);
+      const timer = setTimeout(() => end(() => reject(new Error('timeout')), true), ms || 60000);
       window[name] = json => end(() => resolve(json));
       el.onerror = () => end(() => reject(new Error('load')));
       el.src = url + '&jsonp=' + name;
@@ -112,9 +253,9 @@
   }
 
   // The normal request first. If the browser blocks it, JSONP. The site then keeps JSONP for the next visits.
-  async function request(url) {
+  async function request(url, ms) {
     if (term.jsonp) {
-      try { return await jsonp(url); } catch (e) {
+      try { return await jsonp(url, ms); } catch (e) {
         // With JSONP, a request that Codeforces refuses gives no reason.
         throw new Error('Codeforces did not answer, or it did not accept the request. Check the handle and your connection, then try again.');
       }
@@ -128,7 +269,7 @@
     }
     await sleep(GAP_MS);
     let json;
-    try { json = await jsonp(url); } catch (e) {
+    try { json = await jsonp(url, ms); } catch (e) {
       throw new Error('Codeforces did not answer. Check your connection, or try again in a minute.');
     }
     term.jsonp = true;
@@ -136,11 +277,11 @@
     return json;
   }
 
-  async function call(method, params, retry) {
-    const json = await request(API + method + '?' + new URLSearchParams(params));
+  async function call(method, params, retry, ms) {
+    const json = await request(API + method + '?' + new URLSearchParams(params), ms);
     if (json.status === 'OK') return json.result;
     const comment = String(json.comment || 'unknown error');
-    if (retry && /limit/i.test(comment)) { await sleep(Math.max(GAP_MS, 300)); return call(method, params, false); }
+    if (retry && /limit/i.test(comment)) { await sleep(Math.max(GAP_MS, 300)); return call(method, params, false, ms); }
     const who = /handle (\S+) not found/i.exec(comment);
     const err = new Error(who ? 'Codeforces does not know the handle "' + who[1] + '". Check the spelling.' : 'Codeforces error: ' + comment);
     err.comment = comment;
@@ -414,12 +555,17 @@
   }
 
   const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
-  const defaultRating = () => state.ratingMode === 'exact' ? state.exact : L.targetRating(currentLevel(), state.delta);
+  const defaultBand = () => state.ratingMode === 'exact' ? { lo: state.exact, hi: state.exactHi || state.exact }
+                                                        : L.targetBand(currentLevel(), state.delta, state.deltaHi);
+  const bandText = b => b.lo === b.hi ? String(b.lo) : b.lo + ' to ' + b.hi;
+  const stepText = d => (d < 0 ? '−' : '+') + Math.abs(d);
 
   function ratingText() {
-    if (state.ratingMode === 'exact') return String(state.exact);
-    const d = state.delta;
-    return 'about ' + defaultRating() + ' (level ' + L.roundLevel(currentLevel()) + (d ? (d > 0 ? ' + ' : ' − ') + Math.abs(d) : '') + ')';
+    const b = defaultBand();
+    if (state.ratingMode === 'exact') return bandText(b);
+    const d = state.delta, e = state.deltaHi;
+    return bandText(b) + ' (level ' + L.roundLevel(currentLevel()) +
+      (e != null && e !== d ? ', ' + stepText(Math.min(d, e)) + ' to ' + stepText(Math.max(d, e)) : d ? ' ' + stepText(d) : '') + ')';
   }
 
   function filterText() {
@@ -568,7 +714,7 @@
   function topicRows(list) {
     return list.map(t => '<div class="trow"><span>' + esc(t.tag) + '</span><span class="tstats">' +
       '<span><b>' + t.solved + '</b> solved</span>' +
-      '<span>' + (t.level ? 'level <b>' + t.level + '</b>' : 'no level') + '</span>' +
+      '<span>' + (t.rating != null ? 'rating <b>' + t.rating + '</b>' : '<b>' + t.n + '</b> of 3 clean') + '</span>' +
       '<span><b>' + t.recent + '</b> in 30d</span>' +
       '<span>' + (t.failed ? '<b>' + t.failed + '</b> failed' : '') + '</span>' +
       '<span>' + (t.notClean ? '<b>' + t.notClean + '</b> with hint' : '') + '</span>' +
@@ -582,21 +728,26 @@
   // The banner: your Codeforces numbers, in the style of fastfetch.
   function banner() {
     const now = nowSec(), rank = L.rankOf(data.rating);
-    const sum = L.summary(report(), new Set(state.exclude)), pr = L.progress(data.subs, data.problems, now);
+    const sum = L.summary(report(), new Set(state.exclude)), prog = L.progress(data.subs, data.problems, now);
     const open = openQuests(), acc = open.filter(q => q.status === 'accepted').length;
     const marks = openMarks(), due = marks.filter(m => m.dueAt <= now).length, ups = upsolveItems().length;
-    const strong = sum.above.concat(sum.around).slice(0, 3);
+    const pr = sum.practice;
+    const top = (list, rated) => list.length ? list.slice(0, 3).map(t => esc(t.tag) + (rated ? ' ' + t.rating : '')).join(', ') : 'none yet';
     const lad = ladder(), next = lad.find(r => r.next);
     const title = state.handle + '@codeforces';
     const rows = [
       ['Rating', data.rating ? '<span class="rk">' + data.rating + ' ' + esc(rank.name) + '</span>' +
                  (data.maxRating ? ' (max ' + data.maxRating + ')' : '') : 'no rating yet'],
       ['Level', L.roundLevel(currentLevel()) + (state.levelOverride ? ' (you set it by hand)' : '')],
-      ['Solved', plural(pr.total, 'problem') + ', ' + pr.recent30 + ' in the last 30 days'],
-      ['Last AC', pr.lastOk ? esc(rel(pr.lastOk)) : 'none yet'],
-      ['Contests', pr.contests + ' live, ' + pr.virtuals + ' virtual'],
-      ['Strong', strong.length ? strong.map(t => esc(t.tag) + ' ' + t.level).join(', ') : 'no data yet'],
-      ['Gaps', sum.gaps.length ? sum.gaps.map(t => esc(t.tag)).join(', ') : 'none'],
+      ['Practice', pr.rating != null ? '<b>' + pr.rating + '</b> from your ' + pr.need + ' best clean solves'
+                                     : pr.n + ' of ' + pr.need + ' clean solves for a practice rating'],
+      ['Solved', plural(prog.total, 'problem') + ', ' + prog.recent30 + ' in the last 30 days'],
+      ['Last AC', prog.lastOk ? esc(rel(prog.lastOk)) : 'none yet'],
+      ['Contests', prog.contests + ' live, ' + prog.virtuals + ' virtual'],
+      ['Strong', top(sum.strong, true)],
+      ['On level', top(sum.level, true)],
+      ['Gaps', top(sum.gaps)],
+      ['Start next', top(sum.next)],
       ['Desk', open.length ? open.length + ' open' + (acc ? ', ' + acc + ' with Accepted' : '') : 'empty'],
       ['Upsolve', ups ? plural(ups, 'problem') : 'nothing'],
       ['Re-solve', marks.length ? due + ' due, ' + (marks.length - due) + ' later' : 'nothing'],
@@ -607,7 +758,7 @@
     ];
     if (state.uva) {
       const ac = data.uvaSubs ? data.uvaSubs.filter(x => x.ok) : [];
-      rows.splice(5, 0, ['UVa', !data.uvaSubs ? 'no answer from uHunt'
+      rows.splice(6, 0, ['UVa', !data.uvaSubs ? 'no answer from uHunt'
         : plural(L.solvedKeys(data.uvaSubs).size, 'solved problem') + (ac.length ? ', last AC ' + esc(rel(Math.max.apply(null, ac.map(x => x.time)))) : '')]);
     }
     if (window.CP4) {
@@ -685,7 +836,8 @@
       return io.print(ln('Use: ' + esc(word + ' ' + BY_NAME[word].args), 'dim') + acts(runBtn('help ' + word)));
     }
     if (!deskRoom(io)) return;
-    const rating = a.exact != null ? a.exact : a.delta != null ? L.targetRating(currentLevel(), a.delta) : defaultRating();
+    const band = a.exact != null ? { lo: a.exact, hi: a.exactHi || a.exact }
+      : a.delta != null ? L.targetBand(currentLevel(), a.delta, a.deltaHi) : defaultBand();
     // "with" replaces your included topics for this one problem. "without" adds to your excluded topics.
     const include = new Set(a.include || state.include), exclude = new Set(state.exclude.concat(a.exclude || []));
     const hadInclude = include.size > 0;
@@ -698,7 +850,7 @@
       if (!requireTag) return io.err('No topic fits your topic filters. Remove a filter, then try again.');
     }
     const s = seen();
-    const p = L.pickProblem(data.problems, { rating: rating, skipKeys: s.keys, skipNames: s.names,
+    const p = L.pickProblem(data.problems, { lo: band.lo, hi: band.hi, skipKeys: s.keys, skipNames: s.names,
       include: mode === 'training' ? null : include, exclude: exclude, requireTag: requireTag });
     if (!p) return io.err('No new problem fits this rating and these topics. Change the rating or remove a topic filter.');
     io.print(questCard(addQuest(p, mode, requireTag)) +
@@ -803,7 +955,7 @@
       }
       q = pool[0]; key = q.p.key;
     }
-    if (q && q.status === 'accepted') { chooseResult(q, name); return io.print(questCard(q, true)); }
+    if (q && q.status === 'accepted') { chooseResult(q, name); return io.print(questCard(q, true) + (name === 'clean' ? gainHtml(q.p) : '')); }
     if (q && name === 'spoiled') {
       putAway(q, 'spoiled');
       return io.print(ln('<b>' + esc(show(key)) + '</b> is spoiled. Write the code yourself now. It comes back in 7 days for a new try from scratch.'));
@@ -812,7 +964,8 @@
     const done = solvedQuests().find(x => x.p.key === key);
     if (done) {
       chooseResult(done, name);
-      return io.print(ln('The result of <b>' + esc(show(key)) + '</b> is now ' + esc(L.RESULT_LABEL[name]) + '.') + questCard(done));
+      return io.print(ln('The result of <b>' + esc(show(key)) + '</b> is now ' + esc(L.RESULT_LABEL[name]) + '.') + questCard(done) +
+                      (name === 'clean' ? gainHtml(done.p) : ''));
     }
     if (name !== 'spoiled') return io.err(show(key) + ' is not on your desk.');
     if (/^uva\d+$/.test(key)) return io.err(show(key) + ' is not on your desk. Start it first: start uva ' + key.slice(3));
@@ -904,24 +1057,53 @@
     io.set(banner() + bannerTail());
   }
 
+  // After a clean solve: the change of your practice rating and of the topic ratings of that problem.
+  function gainHtml(p) {
+    const full = (p && data.byKey.get(p.key)) || p;
+    if (!full || full.rating == null || !data.subs) return '';
+    const base = { problems: data.problems, subs: data.subs, level: currentLevel(), now: nowSec(), windowDays: state.windowDays };
+    const res = resultsMap(), without = Object.assign({}, res);
+    without[full.key] = 'hint1';
+    const a = L.topicReport(Object.assign({ results: without }, base)), b = L.topicReport(Object.assign({ results: res }, base));
+    const old = {};
+    for (const t of a.topics) old[t.tag] = t;
+    const line = (x, y, need) => y.rating == null ? y.n + ' of ' + need + ' clean solves for a rating'
+      : x.rating == null ? 'first rating <b>' + y.rating + '</b>'
+      : y.rating > x.rating ? x.rating + ' → <b>' + y.rating + '</b> <b class="up">+' + (y.rating - x.rating) + '</b>'
+      : '<b>' + y.rating + '</b>, no change. A clean solve above ' + y.floor + ' raises it.';
+    const rows = [['practice', line(a.practice, b.practice, b.practice.need)]];
+    for (const t of b.topics) if ((full.tags || []).indexOf(t.tag) >= 0) rows.push([t.tag, line(old[t.tag] || { rating: null }, t, 3)]);
+    return '<div class="gain">' + kv(rows) + '</div>';
+  }
+
   function cmdTopics(io, rest) {
     if (!need(io)) return;
     const all = rest.trim().toLowerCase() === 'all';
-    const rep = report(), sum = L.summary(rep, new Set(state.exclude));
-    const names = (list, lv) => list.length ? list.map(t => esc(t.tag) + (lv ? ' ' + t.level : '')).join(', ') : '<span class="dim">none</span>';
+    const rep = report(), sum = L.summary(rep, new Set(state.exclude)), pr = rep.practice;
+    const names = (list, rated) => list.length ? list.map(t => esc(t.tag) + (rated ? ' <b>' + t.rating + '</b>' : '')).join(', ')
+                                               : '<span class="dim">none</span>';
     const common = rep.topics.filter(t => t.common), rare = rep.topics.filter(t => !t.common);
-    let h = ln('Your level is <b>' + rep.level + '</b>. ' + esc(levelFrom()) + ' The topic levels count solves from ' + periodName() + '.') +
-      kv([['above', names(sum.above, true)], ['around', names(sum.around, true)], ['below', names(sum.below, true)],
-          ['idle 30d', names(sum.noRecent)], ['gaps', names(sum.gaps)]]) +
-      acts(runBtn('train'), runBtn('period'), runBtn('filters')) +
+    let h = ln('Your level is <b>' + rep.level + '</b>. ' + esc(levelFrom())) +
+      ln('Your practice rating is ' + (pr.rating != null ? '<b>' + pr.rating + '</b>. A clean solve above <b>' + pr.floor + '</b> raises it.'
+                                                         : 'not ready: ' + pr.n + ' of ' + pr.need + ' clean solves.')) +
+      kv([['strong', names(sum.strong, true)], ['on level', names(sum.level, true)], ['gaps', names(sum.gaps)], ['start next', names(sum.next)]]) +
+      acts(runBtn('train'), sum.next.length ? fillBtn('train with ' + sum.next.slice(0, 3).map(t => t.tag).join(', ')) : '',
+           runBtn('period'), runBtn('filters')) +
+      (rep.level < 1400 ? ln('Below 1400, your plan puts three skills first: direct simulation, brute force, and case work on paper. ' +
+                             'New topics come second.', 'dim small') : '') +
       head('Common topics near your level, weakest first') + topicRows(common);
     if (all) {
       h += head('Rare topics near your level') +
            ln('Fewer than 3 in 100 problems near your level have these topics. train does not pick them.', 'dim small') + topicRows(rare);
     } else if (rare.length) h += acts(runBtn('topics all', 'topics all (' + rare.length + ' rare topics)'));
-    h += ln('level: the rating where you have 3 or more solves at that rating or higher. above and below: 200 or more from your level. ' +
-            'failed: tried and not solved. Solves that you marked hint or spoiled do not count. + includes a topic for suggest and train. − excludes it.', 'dim small') +
-         ln('These numbers show what you practiced. They are not a measure of skill.', 'dim small');
+    h += ln('practice rating: the mean of your ' + pr.need + ' highest-rated clean solves from ' + periodName() +
+            '. A topic rating uses your 3 highest in that topic. A clean solve above the lowest of them raises the rating.', 'dim small') +
+         ln('strong: a topic rating 200 or more above your level. on level: from 100 below to 199 above. ' +
+            'gaps: common from ' + rep.level + ' to ' + rep.hi + ', with a lower rating or no rating. ' +
+            'start next: rare there, and common from ' + rep.nextLo + ' to ' + rep.nextHi + '.', 'dim small') +
+         ln('failed: tried and not solved. Solves that you marked hint or spoiled do not count. ' +
+            '+ includes a topic for suggest and train. − excludes it.', 'dim small') +
+         ln('These numbers are estimates from your solves. They are not your contest rating.', 'dim small');
     io.print(h);
   }
 
@@ -994,13 +1176,14 @@
     const t = rest.trim().toLowerCase();
     if (t) {
       const a = /with/.test(t) ? { errors: [1] } : L.parseGetArgs(t, []);
-      if (a.errors.length) return io.err('Use a rating such as 1200, a step from your level such as +200 or -100, or the word level.');
-      if (a.exact != null) { state.ratingMode = 'exact'; state.exact = a.exact; }
-      else { state.ratingMode = 'delta'; state.delta = Math.max(-400, Math.min(1000, a.delta)); }
+      if (a.errors.length) return io.err('Use a rating such as 1200, a step from your level such as +200, a range such as +100..+200, or the word level.');
+      const lim = x => Math.max(-400, Math.min(1000, x));
+      if (a.exact != null) { state.ratingMode = 'exact'; state.exact = a.exact; state.exactHi = a.exactHi || null; }
+      else { state.ratingMode = 'delta'; state.delta = lim(a.delta); state.deltaHi = a.deltaHi == null ? null : lim(a.deltaHi); }
       save();
     }
     io.print(ln('suggest and train give problems at ' + esc(ratingText()) + '.') +
-      acts(runBtn('rating -100'), runBtn('rating level'), runBtn('rating +100'), runBtn('rating +200'), runBtn('rating +300'), fillBtn('rating 1200')));
+      acts(runBtn('rating level'), runBtn('rating +100'), runBtn('rating +100..+200'), runBtn('rating +200'), runBtn('rating +300'), fillBtn('rating 1200')));
   }
 
   const filterLine = () => ln('suggest and train use: <span data-live="filters">' + esc(filterText()) + '</span>.');
@@ -1286,15 +1469,130 @@
 
   function cmdReset(io, rest) {
     if (rest.trim().toLowerCase() !== 'confirm') {
-      return io.print(ln('reset deletes your open problems, results, marks, rivals, duels, CP4 check marks and settings on this device. Codeforces keeps your submissions.') +
+      return io.print(ln('reset deletes your open problems, results, marks, rivals, duels, CP4 check marks and settings on this device' +
+                         (LOCK ? ' and in your GitHub repo' : '') + '. Codeforces keeps your submissions.') +
         ln('To continue, run: reset confirm', 'err') + acts(fillBtn('reset confirm')));
     }
-    [K_STATE, K_PROBLEMS, K_CONTESTS, K_RIVALS, K_UVAP].forEach(lsDel);
+    [K_STATE, K_PROBLEMS, K_CONTESTS, K_RIVALS, K_UVAP, K_FIND].forEach(lsDel);
     state = freshState();
+    if (LOCK && sync.token) save();
     Object.assign(data, { problems: null, byKey: new Map(), tags: [], subs: null, rating: null, maxRating: null, unfinished: null,
                           durations: {}, rivalSubs: {}, uvaSubs: null, uvaName: '', uvaList: null });
     $out.innerHTML = '';
     showWelcome(ln('All niel-trains data on this device is deleted.', 'dim'));
+  }
+
+  // ---------------------------------------------------------- lock and sync
+
+  // A line of output with no command above it.
+  function notice(html) {
+    const el = addEntry(null);
+    el.querySelector('.body').innerHTML = html;
+    reveal(el);
+  }
+
+  function showLock() {
+    locked = true;
+    $out.innerHTML = '';
+    const el = addEntry(null);
+    el.classList.add('intro');
+    el.querySelector('.body').innerHTML = logoHtml('var(--accent)') + ln('<b>niel-trains</b> is locked.') +
+      ln('Type your password, then press Enter.', 'dim') + '<p class="ln" id="lockmsg" role="status"></p>';
+    $cmd.value = '';
+    $cmd.type = 'password';
+    $cmd.setAttribute('autocomplete', 'current-password');
+    renderStatus();
+    updateAc();
+  }
+
+  function lockMsg(text, cls) {
+    const el = $('lockmsg');
+    if (el) { el.textContent = text; el.className = 'ln ' + cls; }
+  }
+
+  async function unlock(password) {
+    if (ui.busy) return;
+    ui.busy = true;
+    lockMsg('Checking the password…', 'dim');
+    const token = await L.openBox(LOCK, password);
+    ui.busy = false;
+    if (!token) return lockMsg('Wrong password.', 'err');
+    sync.token = token;
+    storeToken();
+    locked = false;
+    $cmd.type = 'text';
+    $cmd.setAttribute('autocomplete', 'off');
+    $out.innerHTML = '';
+    await boot();
+  }
+
+  // The start of the site, after the password if there is one.
+  async function boot() {
+    let before = '';
+    if (LOCK && sync.token) {
+      live('Loading your data from GitHub…');
+      try { await syncStart(); } catch (e) {
+        setSync('error', e.message);
+        before = ln(esc(e.message) + ' This device shows its own copy of your data.', 'err');
+      }
+      live('');
+    }
+    renderStatus();
+    if (state.handle) { if (before) notice(before); run('fetch'); }
+    else showWelcome(before);
+  }
+
+  const noLock = () => ln('This site has no password lock. Your data stays in this browser.') +
+    ln('For a lock, run setup-lock.cjs in the folder of the site, then push lock.js.', 'dim');
+
+  async function cmdSync(io, rest) {
+    if (!LOCK) return io.print(noLock());
+    const t = rest.trim().toLowerCase();
+    if (t === 'push' || t === 'pull') {
+      while (sync.busy) await sleep(50);
+      if (t === 'push') {
+        lsSet(K_STATE, state);
+        const r = await pushNow();
+        if (r === 'error') return io.err(sync.error);
+        if (r === 'ok') io.print(ln('Saved to GitHub.', 'good'));
+      } else {
+        try {
+          const remote = await pull();
+          if (!remote.found) return io.print(ln('GitHub has no saved data yet.'));
+          adopt(remote);
+          setSync('ok');
+        } catch (e) { setSync('error', e.message); return io.err(e.message); }
+        io.print(ln('Loaded the data from GitHub. It replaced the data on this device.', 'good') + acts(runBtn('refresh')));
+      }
+    } else if (t) return io.err('Use: sync, sync push or sync pull.');
+    const status = sync.status === 'ok' ? 'saved' + (sync.at ? ' ' + rel(sync.at) : '') : sync.status === 'saving' ? 'a change waits for GitHub'
+      : sync.status === 'error' ? 'not saved. ' + sync.error : 'no sync';
+    io.print(kv([['Place', esc(LOCK.owner + '/' + LOCK.repo + ', file ' + LOCK.path) + ' (your private repo)'],
+                 ['Status', esc(status)],
+                 ['This device', term.stay ? 'stays unlocked' : 'asks for the password in each new tab']]) +
+      acts(runBtn('sync push'), runBtn('sync pull'), runBtn(term.stay ? 'stay off' : 'stay on'), runBtn('lock')));
+  }
+
+  async function cmdLock(io) {
+    if (!LOCK) return io.print(noLock());
+    while (sync.busy) await sleep(50);
+    if (sync.timer || lsGet(K_DIRTY) === 1) {
+      const r = await pushNow();
+      if (r !== 'ok') return io.err('Your last change is not on GitHub yet' + (sync.error ? ': ' + sync.error : '.') + ' Run sync push, then lock again.');
+    }
+    dropToken();
+    [K_STATE, K_RIVALS, K_UVAP, K_FIND].forEach(lsDel);
+    location.reload();
+  }
+
+  function cmdStay(io, rest) {
+    if (!LOCK) return io.print(noLock());
+    const t = rest.trim().toLowerCase();
+    if (t === 'on' || t === 'off') { term.stay = t === 'on'; saveTerm(); storeToken(); }
+    else if (t) return io.err('Use: stay on or stay off.');
+    io.print(ln(term.stay ? 'This browser stays unlocked. Use this only on your own device. lock signs you out.'
+                          : 'This browser asks for the password in each new tab.') +
+             acts(runBtn(term.stay ? 'stay off' : 'stay on'), runBtn('lock')));
   }
 
   // ------------------------------------------------------- rivals and duels
@@ -1377,12 +1675,56 @@
     io.print(ladderHtml());
   }
 
+  // Active users of one country, from the Codeforces list of rated users. The default range is from above you to candidate master.
+  async function rivalFind(io, words) {
+    let lo = null, hi = null, all = false;
+    const name = [];
+    for (const w of words) {
+      const m = /^(\d{3,4})(?:-|\.\.)(\d{3,4})$/.exec(w);
+      if (m) { lo = Math.min(Number(m[1]), Number(m[2])); hi = Math.max(Number(m[1]), Number(m[2])); }
+      else if (w.toLowerCase() === 'all') all = true;
+      else name.push(w);
+    }
+    const country = name.join(' ') || state.country || 'Indonesia';
+    if (lo == null) { lo = myRating() + 1; hi = Math.max(2099, lo); }
+    let cache = lsGet(K_FIND);
+    if (!cache || !Array.isArray(cache.users) || String(cache.country).toLowerCase() !== country.toLowerCase() || nowSec() - cache.at > RIVAL_MAX_AGE) {
+      if (ui.busy) return busy(io);
+      ui.busy = true;
+      live('Loading the active users from Codeforces. This list is large. It can take a minute…');
+      try {
+        const list = await api('user.ratedList', { activeOnly: true, includeRetired: false }, 240000);
+        cache = { country: country, at: nowSec(), users: L.countryUsers(list, country) };
+        lsSet(K_FIND, cache);
+      } catch (e) { io.err(e.message); cache = null; }
+      ui.busy = false;
+      live('');
+      if (!cache) return;
+    }
+    if (!cache.users.length) {
+      return io.err('Codeforces lists no active user with the country "' + country + '". Write the country as a Codeforces profile shows it.');
+    }
+    if (name.length && state.country !== country) { state.country = country; save(); }
+    const skip = new Set(state.rivals.map(r => r.handle.toLowerCase()).concat(state.handle.toLowerCase()));
+    const inRange = cache.users.filter(u => u.rating >= lo && u.rating <= hi && !skip.has(u.handle.toLowerCase()));
+    const list = all ? inRange : L.spread(cache.users, lo, hi, 12, skip);
+    if (!list.length) return io.print(ln('No active user from ' + esc(country) + ' has a rating from ' + lo + ' to ' + hi + '.') + acts(fillBtn('rival find 1200-1600')));
+    io.print(ln(plural(inRange.length, 'active user') + ' from <b>' + esc(country) + '</b> with a rating from ' + lo + ' to ' + hi + '.' +
+                (list.length < inRange.length ? ' These ' + list.length + ' are spread over the ratings.' : '')) +
+      list.slice().reverse().map(u => '<div class="rrow"><span class="rmark">[ ]</span><span>' + rankSpan(u.handle, u.rating) + ' ' +
+        esc(L.rankOf(u.rating).name) + ' <span class="dim">max ' + u.maxRating + '</span></span><span class="racts">' +
+        runBtn('rival add ' + u.handle) + runBtn('scout ' + u.handle) + '</span></div>').join('') +
+      ln('Active: a rated contest in the last month. The list is from Codeforces and stays on this device for one day.', 'dim small') +
+      acts(list.length < inRange.length ? runBtn('rival find all') : '', fillBtn('rival find 1200-1600'), fillBtn('rival find Singapore')));
+  }
+
   function cmdRival(io, rest) {
     if (!need(io)) return;
     const m = /^(\S+)\s*([\s\S]*)$/.exec(rest.trim());
     if (!m) return io.print(ladderHtml());
     const verb = m[1].toLowerCase(), names = m[2].split(/[\s,;]+/).filter(Boolean);
     if (verb === 'add') return rivalAdd(io, names);
+    if (verb === 'find') return rivalFind(io, names);
     if (verb === 'remove' || verb === 'rm' || verb === 'delete') return rivalRemove(io, names);
     return cmdScout(io, rest);
   }
@@ -1574,7 +1916,7 @@
   const GROUPS = [['get', 'Get a problem'], ['work', 'Work on a problem'], ['rivals', 'Rivals and duels'], ['see', 'See your data'],
                   ['set', 'Filters and settings'], ['data', 'Data and screen']];
   const GET_MORE = [
-    'rating: 1200 is that rating. +200 or -100 counts from your level. The word level is your level.',
+    'rating: 1200 is that rating. +200 or -100 counts from your level. +100..+200 is a range. The word level is your level.',
     'With no rating, the command uses the rating from the rating command.',
     'with: the problem has one or more of these topics. This replaces your included topics for this one problem.',
     'without: the problem has none of these topics. This adds to your excluded topics for this one problem.',
@@ -1607,8 +1949,9 @@
       more: ['Without a problem, the command uses your latest solved problem.'], ex: ['idea Sort, then take the largest items first.'] },
     { name: 'log', group: 'work', args: '[problem]', run: cmdLog, desc: 'Copy a row for your log sheet.',
       more: ['The row has tabs between the cells: date, problem, SOLVE, time, result, failure reason, lesson.'] },
-    { name: 'rival', group: 'rivals', args: '[add | remove] [handles]', run: cmdRival, desc: 'Show your checkpoints. Add or remove a rival.',
+    { name: 'rival', group: 'rivals', args: '[add | remove | find] [handles]', run: cmdRival, desc: 'Show your checkpoints. Add, remove or find a rival.',
       more: ['A rival is a Codeforces handle that you want to pass. Each rival is a checkpoint.',
+             'rival find shows active users of your country, from above your rating to candidate master. Example: rival find Indonesia 1200-1600.',
              'You pass a checkpoint when you win ' + L.WINS_TO_PASS + ' duels against it.',
              'Put commas between handles. The list stays in this browser and in your export code.'],
       ex: ['rival', 'rival add ', 'rival remove '] },
@@ -1621,7 +1964,7 @@
       ex: ['duel', 'duel check', 'duel drop'] },
     { name: 'duels', group: 'rivals', run: cmdDuels, desc: 'List your duels.' },
     { name: 'fetch', group: 'see', run: cmdFetch, desc: 'Show the banner with your Codeforces numbers.' },
-    { name: 'topics', group: 'see', args: '[all]', run: cmdTopics, desc: 'Show your topic levels and your gaps.' },
+    { name: 'topics', group: 'see', args: '[all]', run: cmdTopics, desc: 'Show your practice rating and your topics: strong, on level, gaps, start next.' },
     { name: 'progress', group: 'see', run: cmdProgress, desc: 'Show your solves by rating and by topic.' },
     { name: 'cp4', group: 'see', args: '[chapter | section | category]', run: cmdCp4, desc: 'Show the problem list of CP4 Book 1, with a check box for each problem.',
       more: ['cp4 shows the chapters and the sections. cp4 1.4 shows one section. cp4 1.4a shows one category.',
@@ -1632,7 +1975,7 @@
     { name: 'upsolve', group: 'see', args: '[all]', run: cmdUpsolve, desc: 'List the contest problems that you did not solve.' },
     { name: 'resolve', group: 'see', run: cmdResolve, desc: 'List your spoiled and parked problems.' },
     { name: 'history', group: 'see', run: cmdHistory, desc: 'List the problems that you finished here.' },
-    { name: 'rating', group: 'set', args: '[1200 | +200 | level]', run: cmdRating, desc: 'Set the rating for suggest and train.' },
+    { name: 'rating', group: 'set', args: '[1200 | +200 | +100..+200 | level]', run: cmdRating, desc: 'Set the rating for suggest and train.' },
     { name: 'include', group: 'set', args: '<topics>', run: cmdFilterSet, desc: 'Give only problems with one or more of these topics.',
       more: ['Put commas between topics. A part of a name is enough: dfs gives dfs and similar.'], ex: ['include dp, greedy'] },
     { name: 'exclude', group: 'set', args: '<topics>', run: cmdFilterSet, desc: 'Never give problems with these topics.',
@@ -1648,16 +1991,21 @@
              'After you set the username, start a UVa problem by its number: start uva 100.',
              'UVa has no ratings and no topics, so a UVa problem has no seal.'], ex: ['uva', 'uva ', 'uva off'] },
     { name: 'theme', group: 'set', args: '[dark | light | auto]', run: cmdTheme, desc: 'Set the colors.' },
+    { name: 'sync', group: 'data', args: '[push | pull]', run: cmdSync, desc: 'Show where your data is saved. Save or load it now.',
+      more: ['With a lock, niel-trains saves your data in your private GitHub repo after each change.',
+             'push saves now. pull loads the data from GitHub. It replaces the data on this device.'] },
+    { name: 'lock', group: 'data', run: cmdLock, desc: 'Sign out in this browser. The site asks for the password again.' },
+    { name: 'stay', group: 'data', args: '[on | off]', run: cmdStay, desc: 'Keep this browser unlocked, or not.' },
     { name: 'export', group: 'data', run: cmdExport, desc: 'Make a code that moves your data to a different device.' },
     { name: 'import', group: 'data', args: '<code>', run: cmdImport, desc: 'Replace the data on this device with the data from a code.' },
     { name: 'refresh', group: 'data', run: cmdFetch, desc: 'Load your data from Codeforces again.' },
-    { name: 'reset', group: 'data', run: cmdReset, desc: 'Delete all niel-trains data on this device.' },
+    { name: 'reset', group: 'data', run: cmdReset, desc: 'Delete all niel-trains data.' },
     { name: 'clear', group: 'data', run: () => {}, desc: 'Clear the screen.' },
     { name: 'help', group: 'data', args: '[command]', run: cmdHelp, desc: 'Show all commands, or one command in detail.' }
   ];
   const BY_NAME = {};
   for (const c of COMMANDS) BY_NAME[c.name] = c;
-  const NO_HANDLE = { help: 1, theme: 1, handle: 1, import: 1, reset: 1 };       // these work before you set a handle
+  const NO_HANDLE = { help: 1, theme: 1, handle: 1, import: 1, reset: 1, sync: 1, lock: 1, stay: 1 };       // these work before you set a handle
 
   function cmdHelp(io, rest) {
     const t = rest.trim().toLowerCase().replace(/^\//, '');
@@ -1734,10 +2082,12 @@
   }
 
   function renderStatus() {
-    const has = !!state.handle;
+    const has = !!state.handle && !locked;
     for (const el of document.querySelectorAll('[data-user]')) el.hidden = !has;
-    $ps1.textContent = has ? '$' : 'handle:';
-    $cmd.placeholder = has ? 'type a command, or help' : 'your Codeforces handle';
+    $ps1.textContent = locked ? 'password:' : has ? '$' : 'handle:';
+    $cmd.placeholder = locked ? 'your password' : has ? 'type a command, or help' : 'your Codeforces handle';
+    $chips.hidden = locked;
+    renderSync();
     const u = $('st-user'), d = $('st-desk'), du = $('st-due'), f = $('st-filters'), dl = $('st-duel');
     u.hidden = d.hidden = f.hidden = !has;
     du.hidden = dl.hidden = true;
@@ -1763,7 +2113,7 @@
   async function run(line) {
     const text = String(line || '').trim();
     let c = L.parseCommand(text);
-    if (!c) return;
+    if (!c || locked) return;
     if (c.name === 'clear') { $out.innerHTML = ''; return; }
     const entry = addEntry(text), body = entry.querySelector('.body');
     const io = {
@@ -1792,7 +2142,8 @@
   // ----------------------------------------------------------- completions
 
   const FIXED_ARGS = { theme: ['dark', 'light', 'auto'], period: ['90', '365', 'all'], limit: ['1', '2', '3', '4', '5'],
-                       rating: ['level', '+100', '+200', '+300', '-100', '-200'], level: ['auto'], topics: ['all'], upsolve: ['all'] };
+                       rating: ['level', '+100', '+100..+200', '+200', '+300', '-100'], level: ['auto'], topics: ['all'], upsolve: ['all'],
+                       sync: ['push', 'pull'], stay: ['on', 'off'] };
 
   function keysFor(name) {
     if (!ready()) return [];
@@ -1862,9 +2213,9 @@
   }
 
   function updateAc() {
-    const items = state.handle ? completions($cmd.value) : [];
+    const items = state.handle && !locked ? completions($cmd.value) : [];
     $ac.hidden = !items.length;
-    $chips.hidden = items.length > 0;
+    $chips.hidden = locked || items.length > 0;
     $ac.innerHTML = items.map(it => '<button type="button" class="c" data-complete="' + esc(it.value) + '">' + esc(it.label) +
       (it.desc ? '<span>' + esc(it.desc) + '</span>' : '') + '</button>').join('');
   }
@@ -1894,6 +2245,7 @@
     $cmd.value = '';
     updateAc();
     if (!text) return;
+    if (locked) { unlock(text); return; }                   // a password does not go into the history or the output
     remember(text);
     run(text);
   });
@@ -1901,6 +2253,7 @@
   $cmd.addEventListener('input', () => { histPos = null; updateAc(); });
 
   $cmd.addEventListener('keydown', e => {
+    if (locked) return;
     if (e.key === 'ArrowUp' && term.hist.length) {
       e.preventDefault();
       if (histPos === null) { draft = $cmd.value; histPos = term.hist.length; }
@@ -1955,9 +2308,11 @@
 
   // ------------------------------------------------------------------ start
 
+  // A change that still waits goes to GitHub when you leave the page.
+  window.addEventListener('pagehide', () => { if (sync.timer) pushNow(true); });
+
   applyTheme();
-  renderStatus();
-  if (state.handle) run('fetch');
-  else showWelcome('');
+  sync.token = LOCK ? readToken() : null;
+  if (LOCK && !sync.token) showLock(); else boot();
   if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) $cmd.focus();
 }());

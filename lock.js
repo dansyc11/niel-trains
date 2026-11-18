@@ -1,0 +1,2 @@
+// Made by setup-lock.cjs. The key in this file is encrypted with your password.
+window.NT_LOCK = {"owner":"dansyc11","repo":"niel-trains-data","path":"state.json","v":1,"salt":"ZSNd37E+tmuzofz6JGF5lw==","iv":"Qn+Ir3v5tkzT7iD1","iter":600000,"box":"h97vk/mzjWC34KXRVMc9HOOdY89UjIQlRifHkFWvAdkQdIktjM5e2reAu7cHPRuY0rs8CrsqCSaM7dcEfzhw29j+dGuKW71ysmbDwv00YOOdupo26aTTORRm53DI6dcLerI18GYqNkaKsR/X1A=="};

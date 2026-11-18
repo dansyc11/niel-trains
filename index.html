@@ -51,6 +51,8 @@
   .seg.app { background: var(--mark); color: var(--mark-ink); font-weight: 800; }
   .seg.user b { color: var(--rk, var(--fg)); }
   .seg.due { color: var(--accent); font-weight: 700; }
+  .up { color: var(--ok); }
+  .gain { margin-top: .4rem; }
   .seg.grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   #st-duel { flex: 0 1 auto; min-width: 7ch; overflow: hidden; text-overflow: ellipsis; }
   @media (max-width: 640px) { .seg { padding: .45rem 1ch; } }
@@ -148,7 +150,7 @@
   @media (pointer: coarse) { .ck { padding: .32rem .2rem; } details.more summary { padding: .35rem 0; } }
 
   .trow { display: grid; grid-template-columns: minmax(18ch, 1fr) auto auto; gap: .1rem 2ch; align-items: center; padding: .25rem 0; border-bottom: 1px dashed var(--line); }
-  .tstats { color: var(--dim); display: grid; grid-template-columns: 10ch 11ch 9ch 9ch 11ch; column-gap: 1ch; }
+  .tstats { color: var(--dim); display: grid; grid-template-columns: 10ch 12ch 9ch 9ch 11ch; column-gap: 1ch; }
   .tstats b { color: var(--fg); font-weight: 600; }
   .tacts { display: flex; gap: .35rem; }
   @media (max-width: 900px) {
@@ -210,6 +212,7 @@
     <button type="button" class="seg due" id="st-due" data-run="resolve" hidden></button>
     <button type="button" class="seg due" id="st-duel" data-run="duel" hidden></button>
     <button type="button" class="seg grow" id="st-filters" data-run="filters" hidden></button>
+    <button type="button" class="seg" id="st-sync" data-run="sync" hidden></button>
   </header>
 
   <main id="out" role="log" aria-live="polite" aria-label="Output"></main>
@@ -239,6 +242,7 @@
     </form>
   </footer>
 
+  <script src="lock.js"></script>
   <script src="cp4.js"></script>
   <script src="logic.js"></script>
   <script src="app.js"></script>
