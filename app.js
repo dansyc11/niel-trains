@@ -32,14 +32,20 @@
 
   function freshState() {
     return { v: 1, handle: '', levelOverride: null, ratingMode: 'delta', delta: 100, deltaHi: 200, exact: 1200, exactHi: null, country: '',
-             include: [], exclude: [], maxOpen: 3, windowDays: 365, quests: [], marks: [], rivals: [], duels: [], uva: null, cp4: {}, nextId: 1 };
+             only: { suggest: [], train: [] }, off: { suggest: [], train: [] }, maxOpen: 3, windowDays: 365, quests: [], marks: [], rivals: [], duels: [], uva: null, cp4: {}, nextId: 1 };
   }
 
   function cleanState(raw) {
     const s = freshState();
     if (!raw || typeof raw !== 'object') return s;
     for (const k of Object.keys(s)) if (raw[k] !== undefined) s[k] = raw[k];
-    for (const k of ['include', 'exclude', 'quests', 'marks', 'rivals', 'duels']) if (!Array.isArray(s[k])) s[k] = [];
+    for (const k of ['quests', 'marks', 'rivals', 'duels']) if (!Array.isArray(s[k])) s[k] = [];
+    // Old data has one include list and one exclude list for both commands.
+    const tagList = x => Array.isArray(x) ? x.filter(t => typeof t === 'string') : [];
+    const pair = (now, old) => ({ suggest: tagList(now && now.suggest !== undefined ? now.suggest : old),
+                                  train: tagList(now && now.train !== undefined ? now.train : old) });
+    s.only = pair(raw.only, raw.include);
+    s.off = pair(raw.off, raw.exclude);
     s.handle = String(s.handle || '');
     if (raw.deltaHi === undefined) {                         // data from before the rating range
       if (raw.delta === undefined || Number(raw.delta) === 200) { s.delta = 100; s.deltaHi = 200; } else s.deltaHi = null;
@@ -573,13 +579,21 @@
       (e != null && e !== d ? ' ' + stepText(Math.min(d, e)) + ' to ' + stepText(Math.max(d, e)) : d ? ' ' + stepText(d) : '') + ')';
   }
 
-  function filterText() {
-    const parts = [state.include.length ? 'only ' + orList(state.include) : 'any topic'];
-    if (state.exclude.length) parts.push('never ' + orList(state.exclude));
+  // Topic switches. off: never give the topic. only: give only these topics.
+  const MODES = ['suggest', 'train'];
+  const topicOn = (tag, mode) => state.only[mode].length ? state.only[mode].indexOf(tag) >= 0 : state.off[mode].indexOf(tag) < 0;
+
+  function modeText(mode) {
+    const parts = [state.only[mode].length ? 'only ' + orList(state.only[mode]) : 'any topic'];
+    if (state.off[mode].length) parts.push('never ' + orList(state.off[mode]));
     return parts.join(', ');
   }
-
-  const filterShort = () => state.include.map(t => '+' + t).concat(state.exclude.map(t => '−' + t)).join(' ') || 'any topic';
+  const filterText = () => modeText('suggest') === modeText('train') ? modeText('suggest')
+    : 'suggest: ' + modeText('suggest') + '. train: ' + modeText('train');
+  function filterShort() {
+    const f = m => state.only[m].map(t => '+' + t).concat(state.off[m].map(t => '−' + t)).join(' ') || 'any topic';
+    return f('suggest') === f('train') ? f('suggest') : f('suggest') + ' | train ' + f('train');
+  }
   const levelFrom = () => state.levelOverride ? 'You set it by hand.'
     : data.rating ? 'It follows your Codeforces rating (' + data.rating + ').' : 'You have no rating yet, so it starts at 800.';
   const periodName = () => state.windowDays === 90 ? 'the last 90 days' : state.windowDays === 365 ? 'the last 12 months' : 'all time';
@@ -643,11 +657,10 @@
     save();
   }
 
-  function toggleTag(tag, list) {
-    const other = list === 'include' ? 'exclude' : 'include';
-    const on = state[list].indexOf(tag) >= 0;
-    state[other] = state[other].filter(t => t !== tag);
-    state[list] = on ? state[list].filter(t => t !== tag) : state[list].concat([tag]);
+  function flipTopic(tag, mode) {
+    const only = state.only[mode], off = state.off[mode];
+    if (only.length) state.only[mode] = only.indexOf(tag) >= 0 ? only.filter(t => t !== tag) : only.concat([tag]);
+    else state.off[mode] = off.indexOf(tag) >= 0 ? off.filter(t => t !== tag) : off.concat([tag]);
     save();
   }
 
@@ -710,20 +723,43 @@
     return (h ? h + ' h' : '') + (h && rest ? ' ' : '') + (rest || !h ? rest + ' min' : '');
   }
 
-  function tg(tag, list, sign) {
-    return '<button type="button" class="c tg" data-tag="' + esc(tag) + '" data-list="' + list + '" aria-pressed="' +
-      (state[list].indexOf(tag) >= 0) + '" aria-label="' + esc((list === 'include' ? 'Include ' : 'Exclude ') + tag) + '">' + sign + '</button>';
-  }
-  const toggles = tag => tg(tag, 'include', '+') + tg(tag, 'exclude', '−');
+  // ---- the topic table: how often a topic occurs, your rating in it, and a switch for suggest and for train
+  const FREQ = [[0.2, 'often', 'fg'], [0.06, 'sometimes', 'fy'], [0, 'rare', 'fx']];
+  const bandBtn = (lo, label, aria) => '<button type="button" class="c" data-band="' + lo + '"' +
+    (aria ? ' aria-label="' + aria + '"' : '') + '>' + label + '</button>';
 
-  function topicRows(list) {
-    return list.map(t => '<div class="trow"><span>' + esc(t.tag) + '</span><span class="tstats">' +
-      '<span><b>' + t.solved + '</b> solved</span>' +
-      '<span>' + (t.rating != null ? 'rating <b>' + t.rating + '</b>' + (t.wins < 3 ? '?' : '') : 'no result') + '</span>' +
-      '<span><b>' + t.recent + '</b> in 30d</span>' +
-      '<span>' + (t.failed ? '<b>' + t.failed + '</b> failed' : '') + '</span>' +
-      '<span>' + (t.notClean ? '<b>' + t.notClean + '</b> with hint' : '') + '</span>' +
-      '</span><span class="tacts">' + toggles(t.tag) + '</span></div>').join('');
+  // On a narrow screen the table has no column heads, so each switch shows its command.
+  const swText = (mode, on) => '<span class="swl">' + mode + ' </span>' + (on ? 'on' : 'off');
+
+  function sw(tag, mode) {
+    const on = topicOn(tag, mode);
+    return '<button type="button" class="c sw" data-sw="' + mode + '" data-tag="' + esc(tag) + '" aria-pressed="' + on +
+      '" aria-label="' + esc(mode + ' ' + tag) + '">' + swText(mode, on) + '</button>';
+  }
+
+  function topicTable(lo) {
+    const mine = L.roundLevel(currentLevel());
+    lo = Math.max(L.MIN_RATING, Math.min(L.MAX_RATING - 300, lo == null || isNaN(lo) ? mine : lo));
+    const band = L.bandShares(data.problems, lo, lo + 300), me = {};
+    for (const t of report().topics) me[t.tag] = t;
+    const rows = data.tags.map(t => ({ tag: t, share: band.share[t] || 0, me: me[t] }))
+      .filter(r => r.share >= 0.01 || (r.me && r.me.rating != null) || !topicOn(r.tag, 'suggest') || !topicOn(r.tag, 'train'))
+      .sort((a, b) => (b.share - a.share) || (a.tag < b.tag ? -1 : 1));
+    return '<div class="ttable">' +
+      '<div class="tband">' + bandBtn(lo - 100, '−', 'Lower rating') + '<span>rated <b>' + lo + '</b> to <b>' + (lo + 300) + '</b>' +
+        (lo === mine ? ' (you)' : '') + '</span>' + bandBtn(lo + 100, '+', 'Higher rating') + (lo === mine ? '' : bandBtn(mine, 'my rating')) + '</div>' +
+      '<div class="trw th"><span>topic</span><span>how often</span><span>you</span><span>suggest</span><span>train</span><span></span></div>' +
+      rows.map(r => {
+        const f = FREQ.find(x => r.share >= x[0]);
+        return '<div class="trw"><span>' + esc(r.tag) + '</span><span class="fq ' + f[2] + '">' + f[1] + ' ' +
+          (r.share < 0.005 ? '<1' : Math.round(100 * r.share)) + '%</span><span>' +
+          (r.me && r.me.rating != null ? '<b>' + r.me.rating + '</b>' + (r.me.wins < 3 ? '?' : '') : '<span class="dim">none</span>') + '</span>' +
+          sw(r.tag, 'suggest') + sw(r.tag, 'train') +
+          '<button type="button" class="c" data-only="' + esc(r.tag) + '" aria-label="' + esc('Train only ' + r.tag) + '">only</button></div>';
+      }).join('') +
+      '<p class="ln dim small">suggest gives: <span data-live="f-suggest">' + esc(modeText('suggest')) + '</span>.<br>' +
+      'train gives: <span data-live="f-train">' + esc(modeText('train')) + '</span>.</p>' +
+      '<div class="acts"><button type="button" class="c" data-allon="1">all on</button></div></div>';
   }
 
   function logoHtml(color) {
@@ -750,7 +786,7 @@
   // The banner: your Codeforces numbers, in the style of fastfetch.
   function banner() {
     const now = nowSec(), rank = L.rankOf(data.rating);
-    const rep = report(), sum = L.summary(rep, new Set(state.exclude)), prog = L.progress(data.subs, data.problems, now);
+    const rep = report(), sum = L.summary(rep, new Set(state.off.train)), prog = L.progress(data.subs, data.problems, now);
     const open = openQuests(), acc = open.filter(q => q.status === 'accepted').length;
     const marks = openMarks(), due = marks.filter(m => m.dueAt <= now).length, ups = upsolveItems().length;
     const pr = sum.practice;
@@ -766,7 +802,6 @@
       ['Start next', sum.next.length ? sum.next.slice(0, 3).map(t => esc(t.tag)).join(', ') : 'none yet'],
       ['Desk', open.length ? open.length + ' open' + (acc ? ', ' + acc + ' with Accepted' : '') : 'empty'],
       ['Upsolve', ups ? plural(ups, 'problem') : 'nothing'],
-      ['Re-solve', marks.length ? due + ' due, ' + (marks.length - due) + ' later' : 'nothing'],
       ['Next', esc('suggest at ' + ratingText() + ', ' + filterText())],
       ['Rival', !lad.length ? 'none yet' : !next ? 'you passed all ' + plural(lad.length, 'checkpoint')
         : rankSpan(next.handle, next.rating) + ', ' + gapText(next.gap) + ', ' + next.wins + ' of ' + L.WINS_TO_PASS + ' duel wins' +
@@ -855,7 +890,8 @@
     const band = a.exact != null ? { lo: a.exact, hi: a.exactHi || a.exact }
       : a.delta != null ? L.targetBand(currentLevel(), a.delta, a.deltaHi) : defaultBand();
     // "with" replaces your included topics for this one problem. "without" adds to your excluded topics.
-    const include = new Set(a.include || state.include), exclude = new Set(state.exclude.concat(a.exclude || []));
+    const sws = word === 'train' ? 'train' : 'suggest';
+    const include = new Set(a.include || state.only[sws]), exclude = new Set(state.off[sws].concat(a.exclude || []));
     const hadInclude = include.size > 0;
     for (const t of a.include || []) if (!(a.exclude || []).includes(t)) exclude.delete(t);
     for (const t of a.exclude || []) include.delete(t);
@@ -919,10 +955,12 @@
       ln('After Codeforces shows Accepted, run ' + runBtn('check'), 'dim'));
   }
 
-  function cmdDesk(io) {
+  function cmdDesk(io, rest) {
     if (!need(io)) return;
+    const size = /^size\b\s*(.*)$/i.exec((rest || '').trim());
+    if (size) return cmdLimit(io, size[1]);
     const open = openQuests();
-    if (!open.length) return io.print(ln('Your desk is empty.') + acts(runBtn('suggest'), runBtn('train'), runBtn('upsolve'), runBtn('resolve')));
+    if (!open.length) return io.print(ln('Your desk is empty.') + acts(runBtn('suggest'), runBtn('train'), runBtn('upsolve')));
     io.print(ln(open.length + ' of ' + state.maxOpen + ' places are in use.', 'dim') + open.map(q => questCard(q)).join('') +
       (open.some(q => q.status === 'open') ? ln('After a judge shows Accepted for a problem, run ' + runBtn('check'), 'dim') : ''));
   }
@@ -1063,11 +1101,12 @@
   }
 
   async function cmdFetch(io, rest, name) {
-    if (!ready() || name === 'refresh') {
+    if (!ready() || name === 'refresh' || nowSec() - (data.at || 0) > 600) {
       if (ui.busy) return busy(io);
       if (name === 'refresh') for (const r of state.rivals) r.missing = false;
       io.set(loadingBanner());
       const res = await loadAll();
+      data.at = nowSec();
       if (res.error) return io.set(ln(esc(res.error), 'err') + acts(runBtn('refresh'), runBtn('handle')));
     }
     io.set(banner() + bannerTail());
@@ -1093,34 +1132,24 @@
 
   function cmdTopics(io, rest) {
     if (!need(io)) return;
-    const all = rest.trim().toLowerCase() === 'all';
-    const rep = report(), sum = L.summary(rep, new Set(state.exclude)), pr = rep.practice;
+    const rep = report(), sum = L.summary(rep, new Set(state.off.train)), pr = rep.practice;
     const names = (list, rated) => list.length ? list.map(t => esc(t.tag) + (rated ? ' <b>' + t.rating + '</b>' : '')).join(', ')
                                                : '<span class="dim">none</span>';
-    const common = rep.topics.filter(t => t.common), rare = rep.topics.filter(t => !t.common);
-    let h = ln('Your rating is <b>' + (data.rating || 'not set yet') + '</b>. Your practice rating is ' +
+    io.print(ln('Your rating is <b>' + (data.rating || 'not set yet') + '</b>. Your practice rating is ' +
         (pr.rating != null ? '<b>' + pr.rating + '</b>' + deltaText(pr.delta, ' in 30 days') + ', from ' + plural(pr.n, 'result') + '.'
                            : 'not ready. It needs one result.')) +
       kv([['strong', names(sum.strong, true)], ['on level', names(sum.level, true)], ['gaps', names(sum.gaps)], ['start next', names(sum.next)]]) +
-      acts(runBtn('train'), sum.next.length ? fillBtn('train with ' + sum.next.slice(0, 3).map(t => t.tag).join(', ')) : '',
-           runBtn('period'), runBtn('filters')) +
+      acts(runBtn('train'), sum.next.length ? fillBtn('train with ' + sum.next.slice(0, 3).map(t => t.tag).join(', ')) : '', runBtn('days')) +
       (rep.level < 1400 ? ln('Below 1400, your plan puts three skills first: direct simulation, brute force, and case work on paper. ' +
                              'New topics come second.', 'dim small') : '') +
-      head('Common topics near your level, weakest first') + topicRows(common);
-    if (all) {
-      h += head('Rare topics near your level') +
-           ln('Fewer than 3 in 100 problems near your level have these topics. train does not pick them.', 'dim small') + topicRows(rare);
-    } else if (rare.length) h += acts(runBtn('topics all', 'topics all (' + rare.length + ' rare topics)'));
-    h += ln('practice rating: the rating that fits your results from ' + periodName() + ' best, on the Codeforces scale. ' +
-            'A problem of a contest that you took counts in full: solved in the contest, or not. ' +
-            'A solve outside a contest has no clock. It counts as a problem 200 easier, with half the weight, and your hardest solves count most. ' +
-            'There, clean is a win, a hint is a part of a win, and spoiled or not solved is a loss. ' +
-            'A result loses half of its weight each 180 days.', 'dim small') +
-         ln('strong: 3 or more solves, and 75 or more above your practice rating. on level: within 75. ' +
-            'gaps: common from ' + rep.level + ' to ' + rep.hi + ', and lower or with fewer than 3 solves. ' +
-            'start next: rare there, and common from ' + rep.nextLo + ' to ' + rep.nextHi + '. ?: fewer than 3 solves.', 'dim small') +
-         ln('failed: tried and not solved. + includes a topic for suggest and train. − excludes it. These numbers are estimates.', 'dim small');
-    io.print(h);
+      topicTable(parseInt(rest, 10)) +
+      ln('how often: the share of the Codeforces problems in that rating range with the topic. − and + move the range. ' +
+         'suggest and train always use your own rating.', 'dim small') +
+      ln('you: your practice rating in the topic, from ' + periodName() + '. ?: fewer than 3 solves. ' +
+         'A contest problem counts in full. A solve outside a contest counts as a problem 200 easier, with half the weight. ' +
+         'A result loses half of its weight each 180 days.', 'dim small') +
+      ln('strong: 3 or more solves, and 75 or more above your practice rating. gaps: often or sometimes near your rating, and lower or with fewer than 3 solves. ' +
+         'only: train gives that topic and no other. These numbers are estimates.', 'dim small'));
   }
 
   function cmdProgress(io) {
@@ -1199,28 +1228,22 @@
       save();
     }
     io.print(ln('suggest and train give problems at ' + esc(ratingText()) + '.') +
-      acts(runBtn('rating level'), runBtn('rating +100'), runBtn('rating +100..+200'), runBtn('rating +200'), runBtn('rating +300'), fillBtn('rating 1200')));
+      acts(runBtn('target +100'), runBtn('target +100..+200'), runBtn('target +200'), runBtn('target +300'), fillBtn('target 1200')));
   }
 
   const filterLine = () => ln('suggest and train use: <span data-live="filters">' + esc(filterText()) + '</span>.');
 
-  function cmdFilters(io) {
-    if (!need(io)) return;
-    io.print(filterLine() +
-      ln('+ includes a topic. A problem then has one or more of your included topics. − excludes a topic. Select the sign again to clear it.', 'dim small') +
-      '<div class="fgrid">' + data.tags.map(t => '<span class="fchip">' + toggles(t) + '<span>' + esc(t) + '</span></span>').join('') + '</div>' +
-      acts(runBtn('unfilter all')));
-  }
+  const cmdFilters = io => cmdTopics(io, '');
 
   function cmdFilterSet(io, rest, name) {
     if (!need(io)) return;
     if (!rest.trim()) return cmdFilters(io);
     const r = L.resolveTopics(rest, data.tags);
     if (r.errors.length) return r.errors.forEach(e => io.err(e));
-    const other = name === 'include' ? 'exclude' : 'include';
-    for (const t of r.tags) {
-      state[other] = state[other].filter(x => x !== t);
-      if (state[name].indexOf(t) < 0) state[name].push(t);
+    const to = name === 'include' ? 'only' : 'off', from = name === 'include' ? 'off' : 'only';
+    for (const m of MODES) for (const t of r.tags) {
+      state[from][m] = state[from][m].filter(x => x !== t);
+      if (state[to][m].indexOf(t) < 0) state[to][m] = state[to][m].concat([t]);
     }
     save();
     io.print(filterLine());
@@ -1236,8 +1259,7 @@
       if (r.errors.length) return r.errors.forEach(e => io.err(e));
       gone = new Set(r.tags);
     }
-    state.include = gone ? state.include.filter(x => !gone.has(x)) : [];
-    state.exclude = gone ? state.exclude.filter(x => !gone.has(x)) : [];
+    for (const m of MODES) for (const k of ['only', 'off']) state[k][m] = gone ? state[k][m].filter(x => !gone.has(x)) : [];
     save();
     io.print(filterLine());
   }
@@ -1270,7 +1292,7 @@
       state.maxOpen = Number(t);
       save();
     }
-    io.print(ln('Your desk has room for ' + plural(state.maxOpen, 'open problem') + '.') + acts(...[1, 2, 3, 4, 5].map(n => runBtn('limit ' + n))));
+    io.print(ln('Your desk has room for ' + plural(state.maxOpen, 'open problem') + '.') + acts(...[1, 2, 3, 4, 5].map(n => runBtn('desk size ' + n))));
   }
 
   async function cmdHandle(io, rest) {
@@ -1875,6 +1897,7 @@
     if (!need(io)) return;
     const arg = rest.trim().split(/[\s,;]+/)[0] || '', low = arg.toLowerCase(), open = openDuel();
     if (low === 'check') return duelCheck(io);
+    if (low === 'history') return cmdDuels(io);
     if (low === 'drop') {
       if (!open) return io.err('No duel is open.');
       open.status = 'dropped'; open.endedAt = nowSec();
@@ -1978,7 +2001,7 @@
              'More solved problems wins. With the same number, the lower penalty wins.',
              'duel check reads your result. duel drop stops the duel with no result.'],
       ex: ['duel', 'duel check', 'duel drop'] },
-    { name: 'duels', group: 'rivals', run: cmdDuels, desc: 'List your duels.' },
+    { name: 'duels', hidden: true, group: 'rivals', run: cmdDuels, desc: 'List your duels.' },
     { name: 'fetch', group: 'see', run: cmdFetch, desc: 'Show the banner with your Codeforces numbers.' },
     { name: 'topics', group: 'see', args: '[all]', run: cmdTopics, desc: 'Show your practice rating and your rating in each topic.' },
     { name: 'progress', group: 'see', run: cmdProgress, desc: 'Show your solves by rating and by topic.' },
@@ -1989,18 +2012,21 @@
              'The list has the problem IDs of the book. The hints are in the book.'],
       ex: ['cp4', 'cp4 1.4', 'cp4 3.2a'] },
     { name: 'upsolve', group: 'see', args: '[all]', run: cmdUpsolve, desc: 'List the contest problems that you did not solve.' },
-    { name: 'resolve', group: 'see', run: cmdResolve, desc: 'List your spoiled and parked problems.' },
+    { name: 'resolve', hidden: true, group: 'see', run: cmdResolve, desc: 'List your spoiled and parked problems.' },
     { name: 'history', group: 'see', run: cmdHistory, desc: 'List the problems that you finished here.' },
-    { name: 'rating', group: 'set', args: '[1200 | +200 | +100..+200 | level]', run: cmdRating, desc: 'Set the rating for suggest and train.' },
-    { name: 'include', group: 'set', args: '<topics>', run: cmdFilterSet, desc: 'Give only problems with one or more of these topics.',
+    { name: 'target', group: 'set', args: '[1200 | +200 | +100..+200]', run: cmdRating, desc: 'Set how far above your rating the problems are.',
+      ex: ['target +100..+200', 'target +200', 'target 1200'] },
+    { name: 'days', group: 'set', args: '[90 | 365 | all]', run: cmdPeriod, desc: 'Set the number of days that the topic ratings count.' },
+    { name: 'rating', hidden: true, group: 'set', args: '[1200 | +200 | +100..+200 | level]', run: cmdRating, desc: 'Set the rating for suggest and train.' },
+    { name: 'include', hidden: true, group: 'set', args: '<topics>', run: cmdFilterSet, desc: 'Give only problems with one or more of these topics.',
       more: ['Put commas between topics. A part of a name is enough: dfs gives dfs and similar.'], ex: ['include dp, greedy'] },
-    { name: 'exclude', group: 'set', args: '<topics>', run: cmdFilterSet, desc: 'Never give problems with these topics.',
+    { name: 'exclude', hidden: true, group: 'set', args: '<topics>', run: cmdFilterSet, desc: 'Never give problems with these topics.',
       more: ['Put commas between topics. A part of a name is enough: geo gives geometry.'], ex: ['exclude geometry, fft'] },
-    { name: 'unfilter', group: 'set', args: '<topics | all>', run: cmdUnfilter, desc: 'Remove topic filters.', ex: ['unfilter dp', 'unfilter all'] },
-    { name: 'filters', group: 'set', run: cmdFilters, desc: 'Show all topics. Change the filters with + and −.' },
-    { name: 'period', group: 'set', args: '[90 | 365 | all]', run: cmdPeriod, desc: 'Set the period of solves that the topic levels count.' },
-    { name: 'level', group: 'set', args: '[number | auto]', run: cmdLevel, desc: 'Set your level by hand, or follow your rating.' },
-    { name: 'limit', group: 'set', args: '[1-5]', run: cmdLimit, desc: 'Set the number of open problems on your desk.' },
+    { name: 'unfilter', hidden: true, group: 'set', args: '<topics | all>', run: cmdUnfilter, desc: 'Remove topic filters.', ex: ['unfilter dp', 'unfilter all'] },
+    { name: 'filters', hidden: true, group: 'set', run: cmdFilters, desc: 'Show all topics. Change the filters with + and −.' },
+    { name: 'period', hidden: true, group: 'set', args: '[90 | 365 | all]', run: cmdPeriod, desc: 'Set the period of solves that the topic levels count.' },
+    { name: 'level', hidden: true, group: 'set', args: '[number | auto]', run: cmdLevel, desc: 'Set your level by hand, or follow your rating.' },
+    { name: 'limit', hidden: true, group: 'set', args: '[1-5]', run: cmdLimit, desc: 'Set the number of open problems on your desk.' },
     { name: 'handle', group: 'set', args: '[name]', run: cmdHandle, desc: 'Set your Codeforces handle.' },
     { name: 'uva', group: 'set', args: '[username | off]', run: cmdUva, desc: 'Set your UVa username. check then reads your UVa verdicts through uHunt.',
       more: ['UVa is the Online Judge at onlinejudge.org. uHunt is its statistics site.',
@@ -2014,7 +2040,7 @@
     { name: 'stay', group: 'data', args: '[on | off]', run: cmdStay, desc: 'Keep this browser unlocked, or not.' },
     { name: 'export', group: 'data', run: cmdExport, desc: 'Make a code that moves your data to a different device.' },
     { name: 'import', group: 'data', args: '<code>', run: cmdImport, desc: 'Replace the data on this device with the data from a code.' },
-    { name: 'refresh', group: 'data', run: cmdFetch, desc: 'Load your data from Codeforces again.' },
+    { name: 'refresh', hidden: true, group: 'data', run: cmdFetch, desc: 'Load your data from Codeforces again.' },
     { name: 'reset', group: 'data', run: cmdReset, desc: 'Delete all niel-trains data.' },
     { name: 'clear', group: 'data', run: () => {}, desc: 'Clear the screen.' },
     { name: 'help', group: 'data', args: '[command]', run: cmdHelp, desc: 'Show all commands, or one command in detail.' }
@@ -2039,7 +2065,7 @@
             ln('Type a command and press Enter, or select a command. Tab completes a command or a topic. The Up key shows your last commands.', 'dim');
     for (const [g, title] of GROUPS) {
       h += head(title) + '<div class="help">';
-      for (const c of COMMANDS.filter(x => x.group === g)) {
+      for (const c of COMMANDS.filter(x => x.group === g && !x.hidden)) {
         h += '<span>' + runBtn(c.name) + '</span><span>' + (c.args ? '<span class="args">' + esc(c.args) + '</span><br>' : '') +
              '<span class="dim">' + esc(c.desc) + '</span></span>';
       }
@@ -2091,9 +2117,12 @@
   }
 
   function syncToggles() {
-    for (const el of document.querySelectorAll('[data-tag][data-list]')) {
-      el.setAttribute('aria-pressed', String(state[el.dataset.list].indexOf(el.dataset.tag) >= 0));
+    for (const el of document.querySelectorAll('[data-sw]')) {
+      const on = topicOn(el.dataset.tag, el.dataset.sw);
+      el.setAttribute('aria-pressed', String(on));
+      el.innerHTML = swText(el.dataset.sw, on);
     }
+    for (const m of MODES) for (const el of document.querySelectorAll('[data-live="f-' + m + '"]')) el.textContent = modeText(m);
     for (const el of document.querySelectorAll('[data-live="filters"]')) el.textContent = filterText();
   }
 
@@ -2158,7 +2187,7 @@
   // ----------------------------------------------------------- completions
 
   const FIXED_ARGS = { theme: ['dark', 'light', 'auto'], period: ['90', '365', 'all'], limit: ['1', '2', '3', '4', '5'],
-                       rating: ['level', '+100', '+100..+200', '+200', '+300', '-100'], level: ['auto'], topics: ['all'], upsolve: ['all'],
+                       rating: ['level', '+100', '+100..+200', '+200', '+300', '-100'], target: ['+100', '+100..+200', '+200', '+300'], days: ['90', '365', 'all'], level: ['auto'], topics: ['all'], upsolve: ['all'],
                        sync: ['push', 'pull'], stay: ['on', 'off'] };
 
   function keysFor(name) {
@@ -2188,7 +2217,7 @@
     const lead = m[1], word = m[2].toLowerCase(), rest = m[4];
     if (!word) return [];
     if (!m[3]) {
-      return COMMANDS.filter(c => c.name.indexOf(word) === 0 && c.name !== 'clear' || c.name === word).slice(0, 8)
+      return COMMANDS.filter(c => (c.name.indexOf(word) === 0 && c.name !== 'clear' && !c.hidden) || c.name === word).slice(0, 8)
         .map(c => ({ label: c.name, desc: c.args || '', value: lead + c.name + ' ' }));
     }
     const name = L.ALIASES[word] || word, start = lead + m[2] + ' ';
@@ -2224,7 +2253,7 @@
     const cut = Math.max(from, rest.lastIndexOf(',') + 1), frag = rest.slice(cut).trim().toLowerCase();
     if (!frag) return [];
     const before = rest.slice(0, cut) + (cut > 0 && !/\s$/.test(rest.slice(0, cut)) ? ' ' : '');
-    const pool = name === 'unfilter' ? state.include.concat(state.exclude, ['all']) : data.tags;
+    const pool = name === 'unfilter' ? state.only.suggest.concat(state.only.train, state.off.suggest, state.off.train, ['all']) : data.tags;
     return topicHits(frag, pool).slice(0, 8).map(t => ({ label: t, value: start + before + t }));
   }
 
@@ -2300,7 +2329,10 @@
     if (d.run != null) { remember(d.run); run(d.run); }
     else if (d.fill != null) setInput(d.fill);
     else if (d.complete != null) setInput(d.complete);
-    else if (d.tag) { toggleTag(d.tag, d.list); syncToggles(); renderStatus(); }
+    else if (d.sw) { flipTopic(d.tag, d.sw); syncToggles(); renderStatus(); }
+    else if (d.only) { state.only.train = [d.only]; save(); syncToggles(); renderStatus(); }
+    else if (d.allon) { state.only = { suggest: [], train: [] }; state.off = { suggest: [], train: [] }; save(); syncToggles(); renderStatus(); }
+    else if (d.band) { const table = el.closest('.ttable'); if (table) table.outerHTML = topicTable(Number(d.band)); }
     else if (d.ck) {
       if (d.auto) return;                                   // the judge gave this mark
       if (state.cp4[d.ck]) delete state.cp4[d.ck]; else state.cp4[d.ck] = 1;

@@ -727,6 +727,19 @@
     return out;
   }
 
+  // The share of the problems rated lo .. hi that have each topic.
+  function bandShares(problems, lo, hi) {
+    let size = 0;
+    const count = {}, share = {};
+    for (const p of problems) {
+      if (p.rating == null || p.rating < lo || p.rating > hi) continue;
+      size++;
+      for (const tag of new Set(p.tags)) if (!IGNORED_TAGS[tag]) count[tag] = (count[tag] || 0) + 1;
+    }
+    for (const tag of Object.keys(count)) share[tag] = count[tag] / size;
+    return { size: size, share: share };
+  }
+
   // ------------------------------------------------------------ rival finder
 
   // Users of one country from user.ratedList, lowest rating first. Only the handle and the ratings stay.
@@ -789,7 +802,7 @@
 
   return {
     countryUsers: countryUsers, spread: spread, lockBox: lockBox, openBox: openBox, textToB64: textToB64, b64ToText: b64ToText,
-    targetBand: targetBand, fitRating: fitRating,
+    targetBand: targetBand, fitRating: fitRating, bandShares: bandShares,
     parseUva: parseUva, uvaProblemFromApi: uvaProblemFromApi, uvaSubFromApi: uvaSubFromApi,
     cp4Items: cp4Items, cp4Stats: cp4Stats, cp4Find: cp4Find,
     WINS_TO_PASS: WINS_TO_PASS, OFFICIAL: OFFICIAL, VIRTUAL: VIRTUAL, same: same, winChance: winChance,
